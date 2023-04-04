@@ -26,7 +26,7 @@ static const char
 rcsid[] = "$Id: w_wad.c,v 1.5 1997/02/03 16:47:57 b1 Exp $";
 
 
-#ifdef NORMALUNIX
+#if defined(NORMALUNIX) || defined(PICO)
 #include <ctype.h>
 #include <sys/types.h>
 #include <string.h>
@@ -35,7 +35,9 @@ rcsid[] = "$Id: w_wad.c,v 1.5 1997/02/03 16:47:57 b1 Exp $";
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <alloca.h>
-#define O_BINARY		0
+    #if defined(NORMALUNIX)
+        #define O_BINARY		0
+    #endif
 #endif
 
 #include "doomtype.h"
@@ -66,10 +68,12 @@ void**			lumpcache;
 
 #define strcmpi	strcasecmp
 
+#ifndef PICO
 void strupr (char* s)
 {
     while (*s) { *s = toupper(*s); s++; }
 }
+#endif
 
 int filelength (int handle) 
 { 

@@ -226,7 +226,7 @@ typedef struct
 {
     char*	name;
     int*	location;
-    int		defaultvalue;
+    int 	defaultvalue;
     int		scantranslate;		// PC scan code hack
     int		untranslated;		// lousy hack
 } default_t;
@@ -254,15 +254,15 @@ default_t	defaults[] =
 
 // UNIX hack, to be removed. 
 #ifdef SNDSERV
-    {"sndserver", (int *) &sndserver_filename, (int) "sndserver"},
+    {"sndserver", (int *) &sndserver_filename, (long long) "sndserver"},
     {"mb_used", &mb_used, 2},
 #endif
     
 #endif
 
 #ifdef LINUX
-    {"mousedev", (int*)&mousedev, (int)"/dev/ttyS0"},
-    {"mousetype", (int*)&mousetype, (int)"microsoft"},
+    {"mousedev", (int*)&mousedev, (long long) "/dev/ttyS0"},
+    {"mousetype", (int*)&mousetype, (long long) "microsoft"},
 #endif
 
     {"use_mouse",&usemouse, 1},

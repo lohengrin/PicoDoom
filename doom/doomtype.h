@@ -24,11 +24,12 @@
 #ifndef __DOOMTYPE__
 #define __DOOMTYPE__
 
+#include <stdbool.h>
 
 #ifndef __BYTEBOOL__
 #define __BYTEBOOL__
 // Fixed to use builtin bool type with C++.
-#ifdef __cplusplus
+#if defined(__cplusplus) || defined(PICO)
 typedef bool boolean;
 #else
 typedef enum {false, true} boolean;
