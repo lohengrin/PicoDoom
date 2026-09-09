@@ -30,7 +30,10 @@
 // Global parameters/defines.
 //
 // DOOM version
-enum { VERSION =  110 };
+// Demo/savegame compatibility byte -- must match the version byte v1.9
+// IWADs actually embed in their demo lumps (verified against wad/DOOM.WAD's
+// DEMO1/2/3, all 109), not the "linuxdoom-1.10" source release name.
+enum { VERSION =  109 };
 
 
 // Game mode handling - identify IWAD version

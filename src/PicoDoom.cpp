@@ -1,139 +1,90 @@
-#include <stdio.h>
-
-// PICO SDK
+// PicoDoom entry point for RP2350 (Waveshare RP2350-PiZero).
+// Replaces doom/i_main.c: bare-metal main() that brings up the board
+// (PSRAM, uSD out of which the WAD is loaded via the sd_stdio.c syscall
+// shim), then hands over to the engine.
+#include <cstdio>
 #include "pico/stdlib.h"
-#include "hardware/i2c.h"
-#include "hardware/adc.h"
 
-#include "ssd1306.h"
+extern "C" {
+#include "d_main.h"
+#include "m_argv.h"
+}
 
-#ifdef RASPBERRYPI_PICO_W
-#include "pico/cyw43_arch.h"
+#include "Psram.hpp"
+extern "C" bool sd_init(void);
+
+static void fatal(const char* msg)
+{
+    printf("PicoDoom: %s\n", msg);
+    while (true)
+        tight_loop_contents();
+}
+
+#ifndef PICODOOM_DIAG_STAGE
+#define PICODOOM_DIAG_STAGE 3
 #endif
 
-#include <memory>
-#include <string.h>
-#include <string>
-#include <deque>
-#include <numeric>
-
-#define PERIOD_US 10000  // 100 Hz
-
-void setup_gpios(void) {
-    i2c_init(i2c1, 400000);
-    gpio_set_function(19, GPIO_FUNC_I2C);
-    gpio_set_function(18, GPIO_FUNC_I2C);
-    gpio_pull_up(19);
-    gpio_pull_up(18);
-
-	adc_init();
-    // Make sure GPIO is high-impedance, no pullups etc
-    adc_gpio_init(26);
-    adc_gpio_init(27);
-}
-
-void draw_graph(std::deque<uint>& adc, uint32_t base, SSD1306& disp)
+// Bring-up diagnostic: bisect which init stage kills USB enumeration, no
+// probe needed. Each stage prints a heartbeat forever instead of falling
+// through, so "device enumerates but goes silent/vanishes at stage N" is
+// visible from dmesg/a terminal alone. Build with
+// -DPICODOOM_DIAG_STAGE={0,1,2,3}; default (3) is the normal full boot.
+// 0=stdio only, 1=+PSRAM, 2=+uSD mount, 3=+D_DoomMain (full boot).
+static void heartbeat(const char* stage_label)
 {
-	while(adc.size()>64) adc.pop_front();
-
-	for( auto i = 0; i < adc.size(); ++i)
-		disp.draw_pixel(base + i, 63 - adc[i] / (4096/32));
-}
-
-// Avg filter
-template <uint8_t N, class input_t = uint16_t, class sum_t = uint32_t>
-class SMA {
-  public:
-    input_t operator()(input_t input) {
-        sum -= previousInputs[index];
-        sum += input;
-        previousInputs[index] = input;
-        if (++index == N)
-            index = 0;
-        return (sum + (N / 2)) / N;
+    unsigned n = 0;
+    while (true) {
+        printf("PicoDoom: %s alive (%u)\n", stage_label, n++);
+        sleep_ms(500);
     }
-    
-    static_assert(
-        sum_t(0) < sum_t(-1),  // Check that `sum_t` is an unsigned type
-        "Error: sum data type should be an unsigned integer, otherwise, "
-        "the rounding operation in the return statement is invalid.");
+}
 
-  private:
-    uint8_t index             = 0;
-    input_t previousInputs[N] = {};
-    sum_t sum                 = 0;
-};
-
-int main()
+// Callable from doom/d_main.c (a C file) to plant checkpoints deeper inside
+// D_DoomMain than main() can reach -- see PICODOOM_DIAG_STAGE 4/5 there.
+extern "C" void picodoom_diag_heartbeat(const char* stage_label)
 {
-	stdio_init_all();
+    heartbeat(stage_label);
+}
 
-#ifdef RASPBERRYPI_PICO_W
-	// Init Wifi if using PICO_W (not used yet)
-	if (cyw43_arch_init())
-	{
-		printf("WiFi init failed");
-		return -1;
-	}
+int main(void)
+{
+    stdio_init_all();
+    printf("PicoDoom boot (diag stage %d)\n", PICODOOM_DIAG_STAGE);
+
+#if PICODOOM_DIAG_STAGE == 0
+    heartbeat("stage0 (stdio only)");
 #endif
 
-   	printf("configuring pins...\n");
-    setup_gpios();
+    printf("PicoDoom: PSRAM init...\n");
+    PsramStatus psram = psram_hw_init();
+    if (!psram.present)
+        fatal("PSRAM not detected");
+    if (!psram.test_ok)
+        fatal("PSRAM detected but self-test failed");
+    printf("PicoDoom: PSRAM OK (%u KB)\n", (unsigned)(psram.size_bytes / 1024));
 
-	// Init Display
-    SSD1306 disp;
-    disp.m_external_vcc=false;
-    disp.init(128, 64, 0x3C, i2c1);
-    disp.clear();
+#if PICODOOM_DIAG_STAGE == 1
+    heartbeat("stage1 (+PSRAM)");
+#endif
 
-	absolute_time_t  nextStep = delayed_by_us(get_absolute_time(),PERIOD_US);
+    printf("PicoDoom: uSD mount...\n");
+    if (!sd_init())
+        fatal("uSD mount failed (is a FAT32 card with the WAD inserted?)");
+    printf("PicoDoom: uSD mounted\n");
 
-	int i = 0;
-	int inc = 1;
+#if PICODOOM_DIAG_STAGE == 2
+    heartbeat("stage2 (+uSD mount)");
+#endif
 
-    adc_select_input(0);
-    adc_select_input(1);
+    // Engine globals (m_argv.c); no command-line parameters for now --
+    // IdentifyVersion finds the WAD (doom1.wad/doom.wad/... ) on the SD root.
+    static char arg0[] = "doom";
+    static char* argv[] = {arg0, nullptr};
+    myargc = 1;
+    myargv = argv;
 
-	std::deque<uint> adc0_q;
-	std::deque<uint> adc1_q;
+    D_DoomMain();
 
-	SMA<4> f0;
-	SMA<4> f1;
-
-	while (true)
-	{
-		double fadc0 = 0.0;
-		double fadc1 = 0.0;
-		
-        adc_select_input(0);
-        uint adc_0_raw = f0(adc_read());
-        adc_select_input(1);
-        uint adc_1_raw = f1(adc_read());
-
-		std::string adc0 = std::to_string(adc_0_raw);
-		std::string adc1 = std::to_string(adc_1_raw);
-
-		// Fifo for graph
-		adc0_q.push_back(adc_0_raw);
-		adc1_q.push_back(adc_1_raw);
-
-
-	    disp.clear();
-		disp.draw_string(0, 0, 2, adc0.c_str());
-		disp.draw_string(64, 0, 2, adc1.c_str());
-
-		draw_graph(adc0_q, 0, disp);
-		draw_graph(adc1_q, 64, disp);
-
-        disp.show();
-
-		i+=inc;
-		if (i > 63) { i = 62; inc = -inc; }
-		if (i < 0) { i = 1; inc = -inc; }
-
-		// Wait next step according to PERIOD_US
-		busy_wait_until(nextStep);
-		nextStep = delayed_by_us(nextStep,PERIOD_US);
-	}
-	return 0;
+    // not reached (I_Error/I_Quit exit); shut the compiler up.
+    return 0;
 }

@@ -148,11 +148,22 @@ extern  line_t*	linespeciallist[MAXLINEANIMS];
 void P_InitPicAnims (void)
 {
     int		i;
+#ifdef PICO
+    // doomtype.h makes boolean a real C99 bool under PICO, which cannot
+    // hold -1 (assigning it coerces to 1/true) -- so the {-1} terminator
+    // below reads back as istexture==true, and the original "!= -1" scan
+    // runs off the end of animdefs[] into adjacent memory. Bound by the
+    // array size instead (sizeof - 1 to exclude that terminator entry).
+    int		numanimdefs = sizeof(animdefs)/sizeof(animdefs[0]) - 1;
+#endif
 
-    
     //	Init animation
     lastanim = anims;
+#ifdef PICO
+    for (i=0 ; i < numanimdefs ; i++)
+#else
     for (i=0 ; animdefs[i].istexture != -1 ; i++)
+#endif
     {
 	if (animdefs[i].istexture)
 	{

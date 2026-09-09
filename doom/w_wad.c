@@ -153,6 +153,9 @@ void W_AddFile (char *filename)
     filelump_t*		fileinfo;
     filelump_t		singleinfo;
     int			storehandle;
+#ifdef PICO
+    filelump_t*		fileinfo_heap = NULL;
+#endif
     
     // open the file and add to directory
 
@@ -200,7 +203,16 @@ void W_AddFile (char *filename)
 	header.numlumps = LONG(header.numlumps);
 	header.infotableofs = LONG(header.infotableofs);
 	length = header.numlumps*sizeof(filelump_t);
+#ifdef PICO
+	// alloca() here would blow this target's ~2 KB stack for any
+	// canonical IWAD's few-thousand-entry directory (tens of KB) --
+	// heap it instead, freed below once the directory is copied out.
+	fileinfo = fileinfo_heap = malloc (length);
+	if (!fileinfo)
+	    I_Error ("W_AddFile: malloc(%d) for wad directory failed", length);
+#else
 	fileinfo = alloca (length);
+#endif
 	lseek (handle, header.infotableofs, SEEK_SET);
 	read (handle, fileinfo, length);
 	numlumps += header.numlumps;
@@ -227,6 +239,11 @@ void W_AddFile (char *filename)
 	
     if (reloadname)
 	close (handle);
+
+#ifdef PICO
+    if (fileinfo_heap)
+	free (fileinfo_heap);
+#endif
 }
 
 
@@ -246,10 +263,13 @@ void W_Reload (void)
     int			handle;
     int			length;
     filelump_t*		fileinfo;
-	
+#ifdef PICO
+    filelump_t*		fileinfo_heap;
+#endif
+
     if (!reloadname)
 	return;
-		
+
     if ( (handle = open (reloadname,O_RDONLY | O_BINARY)) == -1)
 	I_Error ("W_Reload: couldn't open %s",reloadname);
 
@@ -257,13 +277,20 @@ void W_Reload (void)
     lumpcount = LONG(header.numlumps);
     header.infotableofs = LONG(header.infotableofs);
     length = lumpcount*sizeof(filelump_t);
+#ifdef PICO
+    // See W_AddFile: alloca() here would blow this target's tiny stack.
+    fileinfo = fileinfo_heap = malloc (length);
+    if (!fileinfo)
+	I_Error ("W_Reload: malloc(%d) for wad directory failed", length);
+#else
     fileinfo = alloca (length);
+#endif
     lseek (handle, header.infotableofs, SEEK_SET);
     read (handle, fileinfo, length);
-    
+
     // Fill in lumpinfo
     lump_p = &lumpinfo[reloadlump];
-	
+
     for (i=reloadlump ;
 	 i<reloadlump+lumpcount ;
 	 i++,lump_p++, fileinfo++)
@@ -274,8 +301,12 @@ void W_Reload (void)
 	lump_p->position = LONG(fileinfo->filepos);
 	lump_p->size = LONG(fileinfo->size);
     }
-	
+
     close (handle);
+
+#ifdef PICO
+    free (fileinfo_heap);
+#endif
 }
 
 

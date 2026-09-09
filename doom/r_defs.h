@@ -429,7 +429,11 @@ typedef struct
     // If false use 0 for any position.
     // Note: as eight entries are available,
     //  we might as well insert the same name eight times.
-    boolean	rotate;
+    // A real signed type, not boolean: r_things.c memset()s this to -1 as
+    // an "unset" sentinel and later switches on it as -1/0/1 -- reading
+    // that back through a bool (1 byte, only well-defined as 0/1, e.g.
+    // under PICO's doomtype.h) doesn't reliably yield -1.
+    signed char	rotate;
 
     // Lump to use for view angles 0-7.
     short	lump[8];

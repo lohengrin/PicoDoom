@@ -52,4 +52,7 @@ Mkfile.old
 dkms.conf
 
 build/
+build-check/
+build-diag*/
 pico_display_demo.cpp
+wad/**

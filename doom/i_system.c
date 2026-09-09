@@ -50,6 +50,13 @@ rcsid[] = "$Id: m_bbox.c,v 1.1 1997/02/03 22:45:10 b1 Exp $";
 
 int	mb_used = 6;
 
+#ifdef PICO
+// Zone heap lives in PSRAM (8 MB on the RP2350-PiZero): an RP2350's ~500 KB
+// SRAM cannot back DOOM's 6 MB default zone. psram_malloc is provided by
+// src/Psram.cpp; psram_hw_init() runs in main() before D_DoomMain().
+extern void *psram_malloc (size_t);
+#endif
+
 
 void
 I_Tactile
@@ -76,7 +83,11 @@ int  I_GetHeapSize (void)
 byte* I_ZoneBase (int*	size)
 {
     *size = mb_used*1024*1024;
+#ifdef PICO
+    return (byte *) psram_malloc (*size);
+#else
     return (byte *) malloc (*size);
+#endif
 }
 
 
@@ -147,8 +158,18 @@ void I_EndRead(void)
 byte*	I_AllocLow(int length)
 {
     byte*	mem;
-        
+
+#ifdef PICO
+    // screens[] (SCREENWIDTH*SCREENHEIGHT*4 = 250 KB) does not fit in the
+    // ~170 KB left of the RP2350's 512 KB SRAM after DOOM's own static
+    // tables and the SDK/USB/FatFs globals -- same reasoning as I_ZoneBase's
+    // PSRAM-backed zone heap above.
+    mem = (byte *)psram_malloc ((size_t)length);
+#else
     mem = (byte *)malloc (length);
+#endif
+    if (!mem)
+	I_Error ("I_AllocLow: alloc(%d) failed", length);
     memset (mem,0,length);
     return mem;
 }

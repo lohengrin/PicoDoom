@@ -44,6 +44,9 @@ static const char rcsid[] = "$Id: d_main.c,v 1.8 1997/02/03 22:45:09 b1 Exp $";
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+// Bring-up diagnostic checkpoint (src/PicoDoom.cpp), see PICODOOM_DIAG_STAGE
+// in D_DoomMain below.
+extern void picodoom_diag_heartbeat(const char *stage_label);
 #endif
 
 #include "doomdef.h"
@@ -581,6 +584,22 @@ void IdentifyVersion(void)
 	sprintf(basedefault, "%s/.doomrc", home);
 #endif
 
+#ifdef PICO
+	// No env vars/malloc for path-building on bare metal: WAD files sit
+	// directly on the uSD root (mounted by src/sd_stdio.c), found by plain
+	// relative filenames -- NORMALUNIX's block above is never compiled in
+	// for this build, so these must be set here or access() below reads
+	// uninitialized pointers.
+	doom2wad = "doom2.wad";
+	doomuwad = "doomu.wad";
+	doomwad = "doom.wad";
+	doom1wad = "doom1.wad";
+	plutoniawad = "plutonia.wad";
+	tntwad = "tnt.wad";
+	doom2fwad = "doom2f.wad";
+	strcpy(basedefault, "default.cfg");
+#endif
+
 	if (M_CheckParm("-shdev"))
 	{
 		gamemode = shareware;
@@ -766,7 +785,20 @@ void D_DoomMain(void)
 
 	FindResponseFile();
 
+#if defined(PICO) && PICODOOM_DIAG_STAGE == 4
+	picodoom_diag_heartbeat("stage4 (+FindResponseFile)");
+#endif
+
 	IdentifyVersion();
+
+#ifdef PICO
+	printf("PicoDoom: IdentifyVersion -> gamemode=%d, wad=%s\n",
+		   gamemode, wadfiles[0] ? wadfiles[0] : "(none)");
+#endif
+
+#if defined(PICO) && PICODOOM_DIAG_STAGE == 5
+	picodoom_diag_heartbeat("stage5 (+IdentifyVersion)");
+#endif
 
 	setbuf(stdout, NULL);
 	modifiedgame = false;
@@ -843,7 +875,9 @@ void D_DoomMain(void)
 	if (M_CheckParm("-cdrom"))
 	{
 		printf(D_CDROM);
+#ifndef PICO
 		mkdir("c:\\doomdata", 0);
+#endif
 		strcpy(basedefault, "c:/doomdata/default.cfg");
 	}
 
@@ -974,16 +1008,37 @@ void D_DoomMain(void)
 
 	// init subsystems
 	printf("V_Init: allocate screens.\n");
+
+#if defined(PICO) && PICODOOM_DIAG_STAGE == 10
+	picodoom_diag_heartbeat("stage10 (pre-V_Init, post title/parms)");
+#endif
+
 	V_Init();
+
+#if defined(PICO) && PICODOOM_DIAG_STAGE == 6
+	picodoom_diag_heartbeat("stage6 (+V_Init)");
+#endif
 
 	printf("M_LoadDefaults: Load system defaults.\n");
 	M_LoadDefaults(); // load before initing other systems
 
+#if defined(PICO) && PICODOOM_DIAG_STAGE == 7
+	picodoom_diag_heartbeat("stage7 (+M_LoadDefaults)");
+#endif
+
 	printf("Z_Init: Init zone memory allocation daemon. \n");
 	Z_Init();
 
+#if defined(PICO) && PICODOOM_DIAG_STAGE == 8
+	picodoom_diag_heartbeat("stage8 (+Z_Init)");
+#endif
+
 	printf("W_Init: Init WADfiles.\n");
 	W_InitMultipleFiles(wadfiles);
+
+#if defined(PICO) && PICODOOM_DIAG_STAGE == 9
+	picodoom_diag_heartbeat("stage9 (+W_InitMultipleFiles)");
+#endif
 
 	// Check for -file in shareware
 	if (modifiedgame)
