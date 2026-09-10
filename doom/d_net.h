@@ -57,18 +57,21 @@ typedef enum
 
 
 //
-// Network packet data.
+// Network packet data. Would be the actual wire format in a multiplayer
+// game (see docs/PLAN.md's type-size audit -- currently unreachable code,
+// i_net_null.c's doomcom fixes numnodes=1, but pinned to explicit widths
+// now rather than if/when that ever changes).
 //
 typedef struct
 {
     // High bit is retransmit request.
-    unsigned		checksum;
+    uint32_t		checksum;
     // Only valid if NCMD_RETRANSMIT.
-    byte		retransmitfrom;
-    
-    byte		starttic;
-    byte		player;
-    byte		numtics;
+    uint8_t		retransmitfrom;
+
+    uint8_t		starttic;
+    uint8_t		player;
+    uint8_t		numtics;
     ticcmd_t		cmds[BACKUPTICS];
 
 } doomdata_t;
@@ -76,54 +79,62 @@ typedef struct
 
 
 
+// This is the struct src/i_net_null.c actually fills in for real (see its
+// I_InitNetwork, mirroring i_net.c's own single-player setup path) -- a
+// genuine cross-boundary contract for this port, even without real
+// networking, so pinned the same as doomdata_t above. `long id` was the
+// one field worth specifically flagging: id==4 bytes here (ILP32 either of
+// this port's platforms), but `long` is 8 bytes on plenty of real-world
+// LP64 targets -- exactly the kind of assumption that's silently fine until
+// it isn't.
 typedef struct
 {
     // Supposed to be DOOMCOM_ID?
-    long		id;
-    
+    int32_t		id;
+
     // DOOM executes an int to execute commands.
-    short		intnum;		
+    int16_t		intnum;
     // Communication between DOOM and the driver.
     // Is CMD_SEND or CMD_GET.
-    short		command;
+    int16_t		command;
     // Is dest for send, set by get (-1 = no packet).
-    short		remotenode;
-    
+    int16_t		remotenode;
+
     // Number of bytes in doomdata to be sent
-    short		datalength;
+    int16_t		datalength;
 
     // Info common to all nodes.
     // Console is allways node 0.
-    short		numnodes;
+    int16_t		numnodes;
     // Flag: 1 = no duplication, 2-5 = dup for slow nets.
-    short		ticdup;
+    int16_t		ticdup;
     // Flag: 1 = send a backup tic in every packet.
-    short		extratics;
+    int16_t		extratics;
     // Flag: 1 = deathmatch.
-    short		deathmatch;
+    int16_t		deathmatch;
     // Flag: -1 = new game, 0-5 = load savegame
-    short		savegame;
-    short		episode;	// 1-3
-    short		map;		// 1-9
-    short		skill;		// 1-5
+    int16_t		savegame;
+    int16_t		episode;	// 1-3
+    int16_t		map;		// 1-9
+    int16_t		skill;		// 1-5
 
     // Info specific to this node.
-    short		consoleplayer;
-    short		numplayers;
-    
+    int16_t		consoleplayer;
+    int16_t		numplayers;
+
     // These are related to the 3-display mode,
     //  in which two drones looking left and right
     //  were used to render two additional views
     //  on two additional computers.
     // Probably not operational anymore.
     // 1 = left, 0 = center, -1 = right
-    short		angleoffset;
+    int16_t		angleoffset;
     // 1 = drone
-    short		drone;		
+    int16_t		drone;
 
     // The packet data to be sent.
     doomdata_t		data;
-    
+
 } doomcom_t;
 
 

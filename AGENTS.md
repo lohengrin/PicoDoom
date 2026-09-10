@@ -159,7 +159,9 @@ src/Psram.cpp/.hpp    # hardware_psram driver + psram_malloc/free (zone heap), f
 src/sd_stdio.c        # uSD mount (pico_fatfs PIO-SPI) + newlib syscall shim (_open/_read/…)
 src/Ili9486Display.cpp/.hpp  # low-level ILI9486/SPI1 driver, ported from TOM6809
 src/i_video_ili9486.cpp      # DOOM i_video.h impl: screens[0] -> LUT -> LCD (Phase 2)
-src/PicoUsbKeyboard.cpp/.hpp # USB-PIO HID keyboard host on core1 (Phase 3)
+src/PicoUsbKeyboard.cpp/.hpp # USB-PIO HID keyboard host on core1 (Phase 3); owns the
+                              # shared tuh_hid_*_cb callbacks (TinyUSB allows only one each)
+src/PicoUsbMouse.cpp/.hpp    # USB HID mouse (Phase 3), dispatched from PicoUsbKeyboard's callbacks
 src/i_input_usbhid.cpp       # I_StartTic: HID reports -> DOOM event_t/D_PostEvent
 src/tusb_config.h            # TinyUSB config: device (stdio_usb) + host (keyboard)
 boards/               # waveshare_rp2350_pizero.h (adds PSRAM CS + PIO-USB pins)

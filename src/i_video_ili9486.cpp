@@ -61,7 +61,7 @@ uint64_t g_spi_us_in_window = 0;
 uint64_t g_frame_us_in_window = 0;
 
 void report_stats_if_due(uint64_t now_us) {
-    constexpr uint64_t kIntervalUs = 1'000'000; // once a second
+    constexpr uint64_t kIntervalUs = 10'000'000; // once every 10s
     if (g_stats_window_start_us == 0) {
         g_stats_window_start_us = now_us;
         return;

@@ -13,7 +13,7 @@ and USB-serial console output via pico_stdio. Video/sound/net are still null stu
 (`doom/i_*_null.c`) — the engine ticks at 35 Hz and processes `screens[]` (dropped).
 
 Getting from "builds clean" to "boots on hardware" took six real bugs, all fixed
-(two more turned up in Phase 2/3, see below):
+(three more turned up in Phase 2/3, see below):
 - `IdentifyVersion` (d_main.c) only set the WAD-path pointers under `NORMALUNIX`, never
   defined here -> wild-pointer `access()` calls, hard fault, killed USB before it could
   enumerate. Added a `#ifdef PICO` path setting them to plain SD-root filenames.
@@ -87,6 +87,61 @@ alongside the `NORMALUNIX` one (not widening that condition -- `SNDSERV` is
 unconditionally defined in doomdef.h, so folding `PICO` in would also pull
 in an unrelated `sndserver_filename` entry that doesn't exist for this
 build).
+
+Ninth bug, found chasing "keyboard/mouse can move forward but not backward,
+insensitive to mouse sensitivity" (Phase 3 mouse follow-up): `d_ticcmd.h`'s
+`ticcmd_t.forwardmove`/`sidemove` are declared plain `char`, not `signed
+char`. Same root mechanism as the type-size audit's `char`-signedness
+finding above (signed by default on x86 Linux GCC, unsigned by default on
+this ARM toolchain) -- except this time it has a real, live effect instead
+of landing on dead macros: `G_BuildTiccmd` (g_game.c) does
+`cmd->forwardmove += forward`, where `forward` is a signed `int` that can be
+negative (backward movement, or a negative mouse-Y delta); writing a small
+negative value into an effectively-`unsigned char` field wraps it to a large
+value near 256, later misread downstream as a large *positive* (forward)
+move -- backward became impossible, replaced by an always-near-max-speed
+forward, and "insensitive to sensitivity" followed directly since -1 and -5
+both wrap to a value near 256 either way. `G_ReadDemoTiccmd` (same file,
+~30 lines away) already explicitly casts `(signed char)` when reading these
+exact fields back from a demo buffer -- confirming the original id Software
+authors' own intent, just never stated in the struct declaration itself.
+Diagnosed by printing the value at three points (driver's raw HID dy ->
+engine's `mousey` -> final `cmd->forwardmove`) and watching a correct small
+negative number turn into 254/255/253 at the very last step. Fixed by
+declaring both fields `signed char` -- identical size and byte layout to
+plain `char` (so no effect on demo file or network wire format, only on how
+the same byte gets sign-interpreted after reading).
+
+### `<stdint.h>` migration (post-mortem on the ninth bug)
+
+Three real bugs (`d_ticcmd.h`, `spriteframe_t.rotate`, `maptexture_t.masked`)
+all came from the same root cause: a plain C type (`char`, `boolean`) whose
+size or signedness quietly differs between this port's two platforms.
+`doomtype.h` now pulls in `<stdint.h>` (available everywhere that already
+includes it, which is nearly the whole engine), and every struct that
+crosses a real boundary -- a WAD/demo file, the event queue between driver
+and engine, or a would-be network packet -- is pinned to explicit-width
+types instead of `int`/`short`/`char`/`long`:
+- `ticcmd_t` (`d_ticcmd.h`) -- `int8_t forwardmove/sidemove`,
+  `int16_t angleturn/consistancy`, `uint8_t chatchar/buttons`.
+- `spriteframe_t.rotate` (`r_defs.h`) -- `int8_t` (was `signed char`,
+  identical fix, just spelled with the self-documenting width).
+- `maptexture_t`/`mappatch_t` (`r_data.c`, the struct directly responsible
+  for the earlier `masked` bug) -- every field pinned (`int32_t`/`int16_t`),
+  not just the one that already bit us.
+- `event_t` (`d_event.h`) -- `data1/2/3` to `int32_t` (`type` stays the real
+  `evtype_t` enum -- enums size consistently on both platforms already, not
+  the same risk class, see the type-size audit above).
+- `doomdata_t`/`doomcom_t` (`d_net.h`) -- every field, including `long id`
+  -> `int32_t` (`long` is 8 bytes on plenty of real LP64 targets, even
+  though it's 4 here on both of this port's platforms).
+
+Deliberately NOT touched: the other ~500KB of engine code (rendering,
+physics, menu, etc.), where `int`/`short` sizes are already proven identical
+between the original platform and this one -- rewriting working, unrelated
+code to `<stdint.h>` types there would be pure churn with no bug behind it.
+If a genuinely different-width target is ever in scope, that's the point to
+revisit it.
 
 A `PICODOOM_DIAG_STAGE` CMake option (default 3 = normal boot) was added to
 `src/PicoDoom.cpp`/`CMakeLists.txt` to bisect exactly this kind of "no USB output"
@@ -226,10 +281,27 @@ Implemented, ⏳ not yet verified on hardware.
   upstream code -- keeps "zero warnings" meaning what it always meant here:
   clean on the code this project actually maintains.
 
-Mouse/gamepad input and the XPT2046 touch panel are not implemented --
-keyboard alone already satisfies "playable" below.
+Keyboard ✔ verified on hardware (including the movement fix above).
 
-Done state: playable with a USB keyboard. ⏳ Pending hardware test.
+USB HID mouse (`src/PicoUsbMouse.{hpp,cpp}`) added as a follow-up: shares
+PicoUsbKeyboard's TinyUSB host stack/core1 (TinyUSB's C callback ABI allows
+only one `tuh_hid_*_cb` definition per program, so `PicoUsbKeyboard.cpp`
+owns them and dispatches to `PicoUsbMouse` for `HID_ITF_PROTOCOL_MOUSE`
+reports too). Parses the fixed 3-byte boot-protocol report (buttons + signed
+dx + signed dy, no report-ID prefix -- framing knowledge ported from
+TOM6809's `PicoUsbHidInput::on_mouse_report()`, whose doc comment documents
+a real-hardware bug from guessing that framing instead). Unlike TOM6809's
+own `MouseState` (an accumulated *absolute* cursor position, for positioning
+an LVGL cursor), DOOM's `ev_mouse` wants *relative* deltas since the last
+poll -- `take_delta()` accumulates raw HID units and resets on read, one
+poll per `I_StartTic()` tic. Y is inverted from the raw HID sign to match
+`doom/i_video.c`'s original X11 `MotionNotify` convention (push the mouse
+away from you -> move forward). ⏳ Not yet hardware-tested.
+
+Gamepad input and the XPT2046 touch panel are not implemented -- keyboard
+(+ now mouse) already satisfies "playable" below.
+
+Done state: playable with a USB keyboard. ✔ Verified on hardware.
 
 ## Phase 4 — Sound (defer)
 

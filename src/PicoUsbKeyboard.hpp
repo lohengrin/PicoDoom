@@ -18,6 +18,10 @@
  * rebuilt report mid-write (same cross-core convention as TOM6809's
  * PicoUsbHidInput -- a shared single-buffer version showed a real-hardware
  * glitch there from a transiently-all-zero read mid-rebuild).
+ *
+ * init() also brings up PicoUsbMouse (see that class): this file owns the
+ * shared TinyUSB host callbacks (tuh_hid_mount_cb and friends), since
+ * TinyUSB's C ABI allows only one definition of each in the whole program.
  */
 class PicoUsbKeyboard {
 public:

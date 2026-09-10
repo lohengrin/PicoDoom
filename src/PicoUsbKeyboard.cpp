@@ -1,4 +1,5 @@
 #include "PicoUsbKeyboard.hpp"
+#include "PicoUsbMouse.hpp"
 
 #include "hardware/dma.h"
 #include "pico/multicore.h"
@@ -116,10 +117,11 @@ void PicoUsbKeyboard::init()
 
 // --- TinyUSB host callback ABI ---------------------------------------------
 // Free extern "C" functions: TinyUSB's C callback interface carries no
-// user-data parameter. Only one keyboard is ever tracked (unlike TOM6809's
-// PicoUsbHidInput, this doesn't also need to distinguish mice/gamepads/
-// XInput pads), so these call straight into PicoUsbKeyboard's static state
-// rather than through an instance pointer.
+// user-data parameter and allows only one definition of each of these three
+// names in the whole program -- so despite living in "PicoUsbKeyboard.cpp",
+// these also dispatch to PicoUsbMouse for HID_ITF_PROTOCOL_MOUSE reports
+// (same reason TOM6809's single PicoUsbHidInput class fields every HID
+// device kind from one set of callbacks rather than one set per class).
 
 extern "C" void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_report, uint16_t desc_len)
 {
@@ -128,9 +130,11 @@ extern "C" void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t con
     uint8_t const itf_protocol = tuh_hid_interface_protocol(dev_addr, instance);
     if (itf_protocol == HID_ITF_PROTOCOL_KEYBOARD) {
         PicoUsbKeyboard::set_keyboard_connected(true);
+    } else if (itf_protocol == HID_ITF_PROTOCOL_MOUSE) {
+        PicoUsbMouse::on_mount();
     }
     // Re-arm the report queue, or no reports (not even the first) will ever
-    // be delivered. Harmless to do unconditionally for a non-keyboard HID
+    // be delivered. Harmless to do unconditionally for any other HID
     // interface too (e.g. a keyboard's own secondary consumer-control
     // collection) -- tuh_hid_report_received_cb() below simply never acts
     // on those reports.
@@ -142,11 +146,14 @@ extern "C" void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance)
     uint8_t const itf_protocol = tuh_hid_interface_protocol(dev_addr, instance);
     if (itf_protocol == HID_ITF_PROTOCOL_KEYBOARD) {
         PicoUsbKeyboard::set_keyboard_connected(false);
+    } else if (itf_protocol == HID_ITF_PROTOCOL_MOUSE) {
+        PicoUsbMouse::on_unmount();
     }
-    // A yanked keyboard simply stops being updated -- on_keyboard_report()
-    // won't fire again, so its last snapshot would read as "stuck held"
-    // rather than "nothing held". Acceptable for v1 (single input device,
-    // reconnect fixes it); revisit if this proves an issue in practice.
+    // A yanked device simply stops being updated -- on_keyboard_report()/
+    // PicoUsbMouse::on_report() won't fire again, so the last snapshot
+    // would read as "stuck held" rather than "nothing held". Acceptable
+    // for v1 (single input device per kind, reconnect fixes it); revisit
+    // if this proves an issue in practice.
 }
 
 extern "C" void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* report, uint16_t len)
@@ -154,6 +161,8 @@ extern "C" void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, u
     uint8_t const itf_protocol = tuh_hid_interface_protocol(dev_addr, instance);
     if (itf_protocol == HID_ITF_PROTOCOL_KEYBOARD) {
         PicoUsbKeyboard::on_keyboard_report(report, len);
+    } else if (itf_protocol == HID_ITF_PROTOCOL_MOUSE) {
+        PicoUsbMouse::on_report(report, len);
     }
     // Re-arm for the next report -- TinyUSB delivers exactly one report per
     // tuh_hid_receive_report() call.

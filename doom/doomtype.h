@@ -25,6 +25,13 @@
 #define __DOOMTYPE__
 
 #include <stdbool.h>
+// For the fixed-width types used in cross-boundary structs (ticcmd_t,
+// event_t, doomdata_t/doomcom_t -- demo file / would-be network format):
+// see docs/PLAN.md's type-size audit. `int`/`short`/`long` are already the
+// same size on this port's two platforms, but the explicit-width types
+// self-document *why* a field's size is load-bearing, and are what to
+// reach for on any genuinely different-width target.
+#include <stdint.h>
 
 #ifndef __BYTEBOOL__
 #define __BYTEBOOL__

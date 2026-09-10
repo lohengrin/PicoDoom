@@ -40,13 +40,19 @@ typedef enum
     ev_joystick
 } evtype_t;
 
-// Event structure.
+// Event structure. data1/2/3 pinned to an explicit width since this struct
+// crosses from driver code (src/i_input_usbhid.cpp) into the engine's event
+// queue (D_PostEvent/D_ProcessEvents, d_main.c) -- `type` stays the real
+// evtype_t enum (not narrowed to a fixed-width type): GCC sizes an enum by
+// its own declared values consistently on both this port's platforms (see
+// docs/PLAN.md's type-size audit), so it isn't the same risk class as a
+// plain `int`/`short`/`char` field would be.
 typedef struct
 {
     evtype_t	type;
-    int		data1;		// keys / mouse/joystick buttons
-    int		data2;		// mouse/joystick x move
-    int		data3;		// mouse/joystick y move
+    int32_t	data1;		// keys / mouse/joystick buttons
+    int32_t	data2;		// mouse/joystick x move
+    int32_t	data3;		// mouse/joystick y move
 } event_t;
 
  

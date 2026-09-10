@@ -433,7 +433,7 @@ typedef struct
     // an "unset" sentinel and later switches on it as -1/0/1 -- reading
     // that back through a bool (1 byte, only well-defined as 0/1, e.g.
     // under PICO's doomtype.h) doesn't reliably yield -1.
-    signed char	rotate;
+    int8_t	rotate;
 
     // Lump to use for view angles 0-7.
     short	lump[8];

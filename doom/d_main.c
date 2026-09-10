@@ -151,7 +151,15 @@ int eventtail;
 void D_PostEvent(event_t *ev)
 {
 	events[eventhead] = *ev;
-	eventhead = (++eventhead) & (MAXEVENTS - 1);
+	// Not `eventhead = (++eventhead) & (MAXEVENTS-1)`: that modifies
+	// eventhead twice (the increment, then the assignment) with no
+	// sequence point between them -- undefined behavior (GCC's
+	// -Wsequence-point flags the identical pattern elsewhere in d_net.c).
+	// Usually "just works" on unoptimized builds, but nothing stops -O3
+	// from doing something else with it, and this is live, hot code (every
+	// posted event, not the sequence-point warning's dead multiplayer-only
+	// caller in d_net.c).
+	eventhead = (eventhead + 1) & (MAXEVENTS - 1);
 }
 
 //
@@ -166,7 +174,7 @@ void D_ProcessEvents(void)
 	if ((gamemode == commercial) && (W_CheckNumForName("map01") < 0))
 		return;
 
-	for (; eventtail != eventhead; eventtail = (++eventtail) & (MAXEVENTS - 1))
+	for (; eventtail != eventhead; eventtail = (eventtail + 1) & (MAXEVENTS - 1))
 	{
 		ev = &events[eventtail];
 		if (M_Responder(ev))

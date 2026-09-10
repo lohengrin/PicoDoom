@@ -50,6 +50,8 @@ extern "C" void picodoom_diag_heartbeat(const char* stage_label)
 int main(void)
 {
     stdio_init_all();
+    sleep_ms(2000); // Give host time to attach terminal
+    
     printf("PicoDoom boot (diag stage %d)\n", PICODOOM_DIAG_STAGE);
 
 #if PICODOOM_DIAG_STAGE == 0

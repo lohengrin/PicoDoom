@@ -402,26 +402,26 @@ void G_BuildTiccmd (ticcmd_t* cmd)
 	} 
     } 
  
-    forward += mousey; 
-    if (strafe) 
-	side += mousex*2; 
-    else 
-	cmd->angleturn -= mousex*0x8; 
+    forward += mousey;
+    if (strafe)
+	side += mousex*2;
+    else
+	cmd->angleturn -= mousex*0x8;
 
-    mousex = mousey = 0; 
-	 
-    if (forward > MAXPLMOVE) 
-	forward = MAXPLMOVE; 
-    else if (forward < -MAXPLMOVE) 
-	forward = -MAXPLMOVE; 
-    if (side > MAXPLMOVE) 
-	side = MAXPLMOVE; 
-    else if (side < -MAXPLMOVE) 
-	side = -MAXPLMOVE; 
- 
-    cmd->forwardmove += forward; 
+    mousex = mousey = 0;
+
+    if (forward > MAXPLMOVE)
+	forward = MAXPLMOVE;
+    else if (forward < -MAXPLMOVE)
+	forward = -MAXPLMOVE;
+    if (side > MAXPLMOVE)
+	side = MAXPLMOVE;
+    else if (side < -MAXPLMOVE)
+	side = -MAXPLMOVE;
+
+    cmd->forwardmove += forward;
     cmd->sidemove += side;
-    
+
     // special buttons
     if (sendpause) 
     { 

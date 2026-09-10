@@ -70,11 +70,11 @@ rcsid[] = "$Id: r_data.c,v 1.4 1997/02/03 16:47:55 b1 Exp $";
 //
 typedef struct
 {
-    short	originx;
-    short	originy;
-    short	patch;
-    short	stepdir;
-    short	colormap;
+    int16_t	originx;
+    int16_t	originy;
+    int16_t	patch;
+    int16_t	stepdir;
+    int16_t	colormap;
 } mappatch_t;
 
 
@@ -90,13 +90,15 @@ typedef struct
     // `boolean`) -- never actually read (see below), but its size still has
     // to be right or every field after it (width, height, ..., patches[])
     // gets read from the wrong file offset. `boolean` is a 1-byte C99 bool
-    // under PICO (doomtype.h), so it can't be used here; `int` pins the
-    // layout regardless of that.
-    int			masked;
-    short		width;
-    short		height;
-    int			columndirectory;	// OBSOLETE
-    short		patchcount;
+    // under PICO (doomtype.h), so it can't be used here. This whole struct
+    // is cast directly onto raw TEXTURE1/TEXTURE2 WAD bytes (see
+    // R_InitTextures below), so every field's width is load-bearing --
+    // pinned to explicit-width types throughout, not just this one.
+    int32_t		masked;
+    int16_t		width;
+    int16_t		height;
+    int32_t		columndirectory;	// OBSOLETE
+    int16_t		patchcount;
     mappatch_t	patches[1];
 } maptexture_t;
 
