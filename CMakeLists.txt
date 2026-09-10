@@ -245,14 +245,6 @@ target_compile_definitions(PicoDoom PRIVATE
     PICO_ENABLE_USB_RESET_VIA_BAUD_RATE=1
 )
 
-# Hardware bring-up diagnostic: bisect which init stage kills USB enumeration
-# without needing a debug probe. 0=stdio_init_all()+heartbeat only; 1=+PSRAM;
-# 2=+uSD mount; 3=full normal boot (default, unchanged behavior); 4=+D_DoomMain
-# up to FindResponseFile(); 5=+IdentifyVersion(). See src/PicoDoom.cpp and
-# doom/d_main.c.
-set(PICODOOM_DIAG_STAGE 3 CACHE STRING "Boot diagnostic stage: 0=stdio only, 1=+PSRAM, 2=+uSD mount, 3=full boot, 4=+FindResponseFile, 5=+IdentifyVersion")
-target_compile_definitions(PicoDoom PRIVATE PICODOOM_DIAG_STAGE=${PICODOOM_DIAG_STAGE})
-
 pico_enable_stdio_usb(PicoDoom 1)
 pico_enable_stdio_uart(PicoDoom 0)
 

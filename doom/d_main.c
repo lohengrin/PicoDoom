@@ -44,14 +44,6 @@ static const char rcsid[] = "$Id: d_main.c,v 1.8 1997/02/03 22:45:09 b1 Exp $";
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-// Bring-up diagnostic checkpoint (src/PicoDoom.cpp), see PICODOOM_DIAG_STAGE
-// in D_DoomMain below.
-extern void picodoom_diag_heartbeat(const char *stage_label);
-// Movement key bindings (g_game.c) -- diagnostic print after M_LoadDefaults()
-// in D_DoomMain below, to rule out a stale/bad default.cfg overriding the
-// built-in KEY_UPARROW-etc defaults (m_misc.c's defaults[] table).
-extern int key_right, key_left, key_up, key_down;
-extern int key_strafeleft, key_straferight, key_fire, key_use, key_strafe, key_speed;
 #endif
 
 #include "doomdef.h"
@@ -798,20 +790,7 @@ void D_DoomMain(void)
 
 	FindResponseFile();
 
-#if defined(PICO) && PICODOOM_DIAG_STAGE == 4
-	picodoom_diag_heartbeat("stage4 (+FindResponseFile)");
-#endif
-
 	IdentifyVersion();
-
-#ifdef PICO
-	printf("PicoDoom: IdentifyVersion -> gamemode=%d, wad=%s\n",
-		   gamemode, wadfiles[0] ? wadfiles[0] : "(none)");
-#endif
-
-#if defined(PICO) && PICODOOM_DIAG_STAGE == 5
-	picodoom_diag_heartbeat("stage5 (+IdentifyVersion)");
-#endif
 
 	setbuf(stdout, NULL);
 	modifiedgame = false;
@@ -1021,42 +1000,16 @@ void D_DoomMain(void)
 
 	// init subsystems
 	printf("V_Init: allocate screens.\n");
-
-#if defined(PICO) && PICODOOM_DIAG_STAGE == 10
-	picodoom_diag_heartbeat("stage10 (pre-V_Init, post title/parms)");
-#endif
-
 	V_Init();
-
-#if defined(PICO) && PICODOOM_DIAG_STAGE == 6
-	picodoom_diag_heartbeat("stage6 (+V_Init)");
-#endif
 
 	printf("M_LoadDefaults: Load system defaults.\n");
 	M_LoadDefaults(); // load before initing other systems
 
-#ifdef PICO
-	printf("PicoDoom: keys up=%d down=%d left=%d right=%d fire=%d use=%d strafe=%d speed=%d\n",
-		   key_up, key_down, key_left, key_right, key_fire, key_use, key_strafe, key_speed);
-#endif
-
-#if defined(PICO) && PICODOOM_DIAG_STAGE == 7
-	picodoom_diag_heartbeat("stage7 (+M_LoadDefaults)");
-#endif
-
 	printf("Z_Init: Init zone memory allocation daemon. \n");
 	Z_Init();
 
-#if defined(PICO) && PICODOOM_DIAG_STAGE == 8
-	picodoom_diag_heartbeat("stage8 (+Z_Init)");
-#endif
-
 	printf("W_Init: Init WADfiles.\n");
 	W_InitMultipleFiles(wadfiles);
-
-#if defined(PICO) && PICODOOM_DIAG_STAGE == 9
-	picodoom_diag_heartbeat("stage9 (+W_InitMultipleFiles)");
-#endif
 
 	// Check for -file in shareware
 	if (modifiedgame)

@@ -143,10 +143,11 @@ code to `<stdint.h>` types there would be pure churn with no bug behind it.
 If a genuinely different-width target is ever in scope, that's the point to
 revisit it.
 
-A `PICODOOM_DIAG_STAGE` CMake option (default 3 = normal boot) was added to
-`src/PicoDoom.cpp`/`CMakeLists.txt` to bisect exactly this kind of "no USB output"
-failure without a debug probe — heartbeats at each init stage instead of falling
-through. Worth keeping for Phase 2/3 bring-up.
+A `PICODOOM_DIAG_STAGE` CMake option was added during Phase 1 to bisect exactly
+this kind of "no USB output" failure without a debug probe — heartbeats at each
+init stage instead of falling through. Removed once boot was solid through
+Phase 3 (all nine bugs above found and fixed) — if a similar silent-boot
+failure ever needs bisecting again, `git log` has the mechanism to resurrect.
 
 Build:
 ```
