@@ -252,12 +252,36 @@ default_t	defaults[] =
     {"key_strafe",&key_strafe, KEY_RALT},
     {"key_speed",&key_speed, KEY_RSHIFT},
 
-// UNIX hack, to be removed. 
+// UNIX hack, to be removed.
 #ifdef SNDSERV
     {"sndserver", (int *) &sndserver_filename, (long long) "sndserver"},
     {"mb_used", &mb_used, 2},
 #endif
-    
+
+#endif
+
+#ifdef PICO
+    // Same key bindings as the NORMALUNIX block above, duplicated rather
+    // than widening that #ifdef: SNDSERV is unconditionally defined in
+    // doomdef.h, so folding PICO into the NORMALUNIX condition would also
+    // pull in the sndserver_filename entry just above, which doesn't exist
+    // for this build. Missing entirely (as it was) meant M_LoadDefaults()
+    // never touched key_up/key_down/etc, leaving them at their BSS zero-init
+    // value -- gamekeydown[key_up] then checks gamekeydown[0], which a real
+    // keypress (HID usage IDs start at 0x04) never sets, so movement silently
+    // never registered even though the event pipeline itself (menu
+    // navigation, screen-size +/-, ESC -- all hardcoded KEY_* comparisons,
+    // not this table) worked fine.
+    {"key_right",&key_right, KEY_RIGHTARROW},
+    {"key_left",&key_left, KEY_LEFTARROW},
+    {"key_up",&key_up, KEY_UPARROW},
+    {"key_down",&key_down, KEY_DOWNARROW},
+    {"key_strafeleft",&key_strafeleft, ','},
+    {"key_straferight",&key_straferight, '.'},
+    {"key_fire",&key_fire, KEY_RCTRL},
+    {"key_use",&key_use, ' '},
+    {"key_strafe",&key_strafe, KEY_RALT},
+    {"key_speed",&key_speed, KEY_RSHIFT},
 #endif
 
 #ifdef LINUX

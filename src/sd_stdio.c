@@ -218,6 +218,7 @@ int _isatty(int fd)
 
 int _gettimeofday(struct timeval* tv, void* tz)
 {
+    (void)tz; // no timezone support
     uint64_t us = time_us_64();
     tv->tv_sec = us / 1000000;
     tv->tv_usec = us % 1000000;

@@ -86,7 +86,13 @@ typedef struct
 typedef struct
 {
     char		name[8];
-    boolean		masked;	
+    // File format field is a fixed 4 bytes (matches the original enum/int
+    // `boolean`) -- never actually read (see below), but its size still has
+    // to be right or every field after it (width, height, ..., patches[])
+    // gets read from the wrong file offset. `boolean` is a 1-byte C99 bool
+    // under PICO (doomtype.h), so it can't be used here; `int` pins the
+    // layout regardless of that.
+    int			masked;
     short		width;
     short		height;
     int			columndirectory;	// OBSOLETE

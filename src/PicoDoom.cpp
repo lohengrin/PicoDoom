@@ -11,6 +11,7 @@ extern "C" {
 }
 
 #include "Psram.hpp"
+#include "PicoUsbKeyboard.hpp"
 extern "C" bool sd_init(void);
 
 static void fatal(const char* msg)
@@ -75,6 +76,13 @@ int main(void)
 #if PICODOOM_DIAG_STAGE == 2
     heartbeat("stage2 (+uSD mount)");
 #endif
+
+    // Phase 3: USB-PIO HID keyboard host (GPIO28/29), on its own core1 --
+    // started here, before D_DoomMain(), so it has the whole WAD-load/
+    // engine-init stretch to enumerate a keyboard before the game loop
+    // starts polling it (see src/PicoUsbKeyboard.cpp).
+    printf("PicoDoom: USB-PIO keyboard host init (core1)...\n");
+    PicoUsbKeyboard::init();
 
     // Engine globals (m_argv.c); no command-line parameters for now --
     // IdentifyVersion finds the WAD (doom1.wad/doom.wad/... ) on the SD root.

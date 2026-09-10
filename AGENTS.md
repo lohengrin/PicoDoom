@@ -15,12 +15,12 @@ A Raspberry Pi **Pico 2 (RP2350)** port of DOOM.
 - Target hardware (user-specified): **Waveshare RP2350-PiZero** (RP2350B, 16 MB flash,
   8 MB PSRAM on GPIO47, PIO-USB on GPIO28/29, µSD card, and a **Waveshare 3.5" RPi
   LCD (A)** — SPI, ILI9486 controller + XPT2046 touch).
-- Current state: Phase 1 is **done and verified on real hardware** — the engine boots,
-  mounts the µSD, loads the WAD, and runs a live game loop over USB serial, headless
-  (`build/`, board `waveshare_rp2350_pizero`). The classic video/sound/net files
-  are NOT linkable on Pico, so video, sound and net are intentional "bring-up" stubs for
-  now. Bringing the real LCD/input/sound (Phase 2/3, see docs/PLAN.md) is the current
-  development goal.
+- Current state: Phase 1 (boot) and Phase 2 (ILI9486 LCD video) are **done and
+  verified on real hardware** — the engine boots, mounts the µSD, loads the WAD, and
+  DOOM renders on the panel (not yet a full 35 fps — see docs/PLAN.md's Performance
+  notes). Phase 3 (USB-PIO HID keyboard) is implemented, not yet hardware-verified.
+  Sound is still an intentional "bring-up" stub (`doom/i_sound_null.c`) — real audio
+  is Phase 4. `build/`, board `waveshare_rp2350_pizero`.
 
 ## Key reference project (read this first)
 
@@ -78,20 +78,28 @@ Linux `doom/` tree provides X11 implementations; this port replaces them per-fil
 |------|--------------|-----------|
 | `i_main.c` | `main()` → `D_DoomMain()` | not linked; `src/PicoDoom.cpp` is `main` |
 | `i_system.c` | `I_GetTime`/`I_ZoneBase`/`I_Error`/`I_Quit`/`I_Init` | `I_ZoneBase` → PSRAM heap under `#ifdef PICO`; the rest rides the `/linux` syscall shim (`time_us_64`, `usleep`) |
-| `i_video.c`, `i_video_pimoroni.c` | X11 video (`sys/ipc.h`, XShm) | **cannot compile for Pico** — replaced by null for now; real driver: ILI9486 (see below) |
-| `i_sound.c`, `i_net.c` | Linux OSS / IPX | not linked; `i_sound_null.c`,`i_net_null.c` stubs for now |
-| `i_video_null.c`, `i_sound_null.c`, `i_net_null.c` | — | headless bring-up stubs so the engine links |
+| `i_video.c`, `i_video_pimoroni.c` | X11 video (`sys/ipc.h`, XShm) | **cannot compile for Pico**; replaced by `src/i_video_ili9486.cpp` (real ILI9486 driver, Phase 2) |
+| `i_sound.c`, `i_net.c` | Linux OSS / IPX | not linked; `i_sound_null.c` stub for now, `i_net_null.c` mirrors `i_net.c`'s single-player `doomcom` setup |
+| `i_sound_null.c`, `i_net_null.c` | — | headless bring-up stubs so the engine links |
 | `d_main.c` | `D_DoomMain`, game startup | `#ifdef PICO` (stdio); stray `mkdir("c:\\doomdata",0)` in the `-cdrom` branch is guarded by `#ifndef PICO` |
 
-Headless stubs currently implement the full symbol surface the engine references:
-`I_InitGraphics/ShutdownGraphics/SetPalette/UpdateNoBlit/FinishUpdate/ReadScreen/WaitVBL/StartTic/StartFrame/GetEvent`,
-all sound `I_*` (Init/Start/Stop/Update/…) and `I_InitNetwork/I_NetCmd`.
+Headless sound/net stubs implement the full symbol surface the engine references:
+all sound `I_*` (Init/Start/Stop/Update/…) and `I_InitNetwork/I_NetCmd` (net now sets
+up a real single-player `doomcom`, not a no-op — see docs/PLAN.md's Phase 1 bug list).
 
-### Rendering contract (for the future LCD driver)
+### Video: src/i_video_ili9486.cpp (Phase 2, done)
 - DOOM renderer writes `screens[0]`: 320×200, palette-indexed (indices 0–255).
-- `I_SetPalette()` receives the PLAYPAL lump (256×3 RGB); cache it until next change.
-- `I_FinishUpdate()` is called at the end of every tic → blit `screens[0]` to the LCD
-  (convert index→RGB565; scale 320×200 to the 480×320 panel or 1:1 with border).
+- `I_SetPalette()` receives the PLAYPAL lump (256×3 RGB, full 8-bit values) each time
+  the palette changes; rebuilds a 256-entry RGB565 (wire/big-endian) LUT via
+  `gammatable[usegamma]`, matching the reference X11 driver's `UploadNewPalette`.
+- `I_FinishUpdate()` is called at the end of every tic → LUT-converts `screens[0]`
+  row by row and streams it to the panel via `Ili9486Display`, centered 1:1 (no
+  scaling) in an 80/60px black border (320×200 doesn't evenly scale to 480×320).
+  No DMA/double-buffer yet — synchronous `spi_write_blocking` per row; revisit if
+  35 fps isn't achievable (see docs/PLAN.md).
+- `src/Ili9486Display.{hpp,cpp}` — low-level SPI1 driver, ported verbatim from the
+  validated TOM6809 project (shift-register wire protocol, panel init sequence);
+  needs C++20 (`std::span`), hence `CMAKE_CXX_STANDARD 20`.
 - Rendering happens synchronously on core 0 in the tic loop (single-core, no RTOS).
 
 ### Timing / loop
@@ -127,7 +135,10 @@ LCD driver.
   `screens[0]`; the automap overlays the same framebuffer. Full 320×200 index pipeline.
 - `doomstat`/`gamestate` etc. are plain globals; a native `pause` and the console output
   can be added without touching the engine.
-- C11 (C standard), C++17 for drivers; engine is C → easy `extern "C"` binding.
+- C11 (C standard), C++20 for drivers (needed for `std::span` in Ili9486Display);
+  engine is C → easy `extern "C"` binding, but the *definitions* need `extern "C"`
+  too when they live in a `.cpp` file (see src/i_video_ili9486.cpp), not just the
+  included header's declarations, or the linker gets C++-mangled symbol names.
 
 ## Conventions
 
@@ -146,9 +157,13 @@ CMakeLists.txt        # PicoDoom target; DOOMSRC list; pico_fatfs FetchContent; 
 src/PicoDoom.cpp      # bare-metal main(): PSRAM init → sd_init() → D_DoomMain()
 src/Psram.cpp/.hpp    # hardware_psram driver + psram_malloc/free (zone heap), free-list allocator
 src/sd_stdio.c        # uSD mount (pico_fatfs PIO-SPI) + newlib syscall shim (_open/_read/…)
+src/Ili9486Display.cpp/.hpp  # low-level ILI9486/SPI1 driver, ported from TOM6809
+src/i_video_ili9486.cpp      # DOOM i_video.h impl: screens[0] -> LUT -> LCD (Phase 2)
+src/PicoUsbKeyboard.cpp/.hpp # USB-PIO HID keyboard host on core1 (Phase 3)
+src/i_input_usbhid.cpp       # I_StartTic: HID reports -> DOOM event_t/D_PostEvent
+src/tusb_config.h            # TinyUSB config: device (stdio_usb) + host (keyboard)
 boards/               # waveshare_rp2350_pizero.h (adds PSRAM CS + PIO-USB pins)
 doom/                 # upstream DOOM 1.10 + null i_* stubs + PICO guards
-doom/i_video_null.c   # headless video stub
 doom/i_sound_null.c   # sound stub
 doom/i_net_null.c     # net stub
 docs/                 # PLAN.md + Waveshare product docs (saved pages)
