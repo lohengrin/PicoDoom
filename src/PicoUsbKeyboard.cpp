@@ -1,5 +1,6 @@
 #include "PicoUsbKeyboard.hpp"
 #include "PicoUsbMouse.hpp"
+#include "i_video_core1.hpp"
 
 #include "hardware/dma.h"
 #include "pico/multicore.h"
@@ -104,8 +105,13 @@ void PicoUsbKeyboard::host_stack_setup()
 void PicoUsbKeyboard::core1_entry()
 {
     host_stack_setup();
+    // Phase 4.5 (performance): core1 now also owns the LCD blit -- see
+    // i_video_core1.hpp -- interleaved one row at a time with tuh_task() so
+    // a pending frame's ~41ms SPI feed can't starve Pico-PIO-USB's
+    // software-timed host servicing.
     while (true) {
         tuh_task();
+        i_video_core1_step();
     }
 }
 

@@ -110,7 +110,11 @@ angle_t			xtoviewangle[SCREENWIDTH+1];
 // fixed_t		finetangent[FINEANGLES/2];
 
 // fixed_t		finesine[5*FINEANGLES/4];
+#ifdef PICO
+const fixed_t*		finecosine = &finesine[FINEANGLES/4];
+#else
 fixed_t*		finecosine = &finesine[FINEANGLES/4];
+#endif
 
 
 lighttable_t*		scalelight[LIGHTLEVELS][MAXLIGHTSCALE];

@@ -112,6 +112,38 @@ declaring both fields `signed char` -- identical size and byte layout to
 plain `char` (so no effect on demo file or network wire format, only on how
 the same byte gets sign-interpreted after reading).
 
+Tenth bug, found chasing a hard freeze during startup ("P_Init: Init
+Playloop state." then nothing, no further output) after Phase 4.5's video
+performance work (2026-09-11) -- turned out completely unrelated to that
+work, just newly exposed by it (first time this specific commercial
+`doom.wad` -- Doom II's IWAD, not the shareware/registered one used in
+earlier tests -- made it this far). Bisected with temporary `#ifdef PICO`
+printfs at each step of `P_Init()` and then each sprite name inside
+`R_InitSpriteDefs()` (r_things.c): hung right after printing garbage for
+sprite index `[138/145]`, immediately following a *correct* `[137/145]
+TLP2` -- the last of `info.c`'s real 138 `sprnames[]` entries. Root cause:
+`info.h` declares `extern char *sprnames[NUMSPRITES]` (exactly 138, no
+extra slot), but `R_InitSpriteDefs()` counts entries by scanning for a NULL
+terminator (`while (*check != NULL) check++`) -- reading `sprnames[138]` is
+undefined behavior on *any* platform; it happened to "work" on the original
+x86_64 Linux build purely because whatever the linker placed right after
+`sprnames[]` in memory there contained a zero soon enough. On this build's
+memory layout it doesn't: the scan walked 7 pointers past the real array
+before finding a zero (`numsprites=145` printed, not 138), and
+`R_InitSpriteDefs()` then dereferenced those 7 garbage "pointers" as sprite
+name strings, hard-faulting silently (no crash message -- `printf("%s",
+garbage_pointer)` walked off into unmapped memory) on the first one whose
+garbage bytes didn't luckily form a short valid-looking C string. Fixed at
+the actual bug site rather than working around it in `R_InitSpriteDefs()`'s
+generic-looking scan: `info.h`/`info.c` now declare `sprnames[NUMSPRITES+1]`
+under `#ifdef PICO`, and C's aggregate-initialization rules zero-fill the
+one slot `info.c`'s 138-entry initializer list doesn't cover, giving the
+scan a real terminator instead of relying on adjacent-memory luck. Same
+class of "relies on the platform's incidental memory layout" bug as the
+`{-1}`-sentinel `animdefs[]` bug (sixth bug above), but this one isn't a
+sentinel-*value* problem (boolean-size-related) -- it's an out-of-bounds
+*read* that both platforms technically commit, one just gets away with it.
+
 ### `<stdint.h>` migration (post-mortem on the ninth bug)
 
 Three real bugs (`d_ticcmd.h`, `spriteframe_t.rotate`, `maptexture_t.masked`)
@@ -238,6 +270,167 @@ Performance, found through real hardware measurement, not assumed:
 Done state: DOOM is visible and playable-by-menu. ✔ Verified on hardware,
 not yet at a full 35 fps (see Performance above).
 
+### Phase 4.5 — Performance: split the blit onto core1 (2026-09, ⏳ not yet hardware-tested)
+
+Objective: 30Hz+ (up from the ~9fps measured above). Moved the LCD blit
+(palette->RGB565 convert + DMA-fed SPI push) off core0 entirely, onto
+core1 (previously dedicated to Pico-PIO-USB's `tuh_task()` loop, Phase 3) --
+see AGENTS.md's Video section for the full mechanism (ping-pong `memcpy` of
+`screens[0]` + inter-core FIFO handoff + one-row-per-call stepping so
+`tuh_task()` still gets serviced during the transfer). Deliberately did not
+ping-pong the engine's `screens[0]` pointer itself, to avoid auditing 1993
+engine code for hidden assumptions that its address is stable across a tic.
+
+**Hardware result (first cut, one row + one DMA transfer + one `tuh_task()`
+call per call to `i_video_core1_step()`)**: `FPS 10.5  core0-wait 30%
+core1-blit 100%` -- no improvement over the single-core baseline. `core1-
+blit 100%` means core1 is saturated (never idle between frames), so it *is*
+the bottleneck, confirming the SPI feed dominates after all -- but the
+measured ~95ms/frame blit time is over 2x the ~41ms theoretical minimum for
+128000 bytes at 25MHz. The gap wasn't in the SPI transfer itself; it was in
+doing that transfer as 200 separate row-sized DMA operations each followed
+by a `tuh_task()` call: `dma_channel_configure()` has real per-call
+overhead, and `tuh_task()` (never profiled in isolation, but plausible given
+Pico-PIO-USB's software-timed bus servicing) likely costs a few hundred µs
+itself -- 200 calls/frame of either is enough to account for the ~54ms gap.
+
+Tried (reverted): batched `i_video_core1_step()` to convert+DMA-transfer
+`kRowsPerChunk=8` rows per call instead of 1, on the theory above (200
+`dma_channel_configure()`/`tuh_task()` calls per frame both costing real
+per-call overhead). **Result: worse, and it hung.** `FPS 9.1-9.6` (down from
+10.5), `core0-wait 18-28%`, `core1-blit` climbing toward `100%` across the
+two stats lines that printed before the board stopped responding entirely
+(~20-25s in, matching two 10s windows) -- consistent with a genuine hang,
+not a crash-and-reboot: core0's own `I_FinishUpdate()` would block forever
+on `g_blit_buf_free[]` if core1 got stuck, which would exactly explain "only
+two stats lines, then nothing" (stats print from `report_stats_if_due()`,
+called only from `I_FinishUpdate()`).
+
+Two things this ruled in/out:
+- The `#ifdef PICO`-nesting in the same commit's `doom/s_sound.c` sound-
+  disable change was checked and is correctly balanced -- not the cause.
+- Batching made throughput *worse*, not just "not better enough" -- that's
+  the real tell. It contradicts the per-call-overhead theory outright (fewer
+  calls should never cost more), and points instead at either (a) real
+  PSRAM-bandwidth contention between core0's screens[0]->blit-buffer memcpy
+  and core1's own PSRAM reads during conversion, worsened by core1 issuing
+  bigger/less-frequent bursts, or (b) Pico-PIO-USB's software-timed bus
+  servicing needing a tighter cadence than one call per ~1.6ms chunk (vs.
+  ~200us/row before) -- stretching the gap between `tuh_task()` calls from
+  "one row's DMA wait" to "one whole chunk's convert+DMA time" plausibly
+  wedges it. Neither confirmed; both plausible; not worth re-risking a hang
+  to find out by guessing again.
+
+Reverted `kRowsPerChunk` to 1 (the known-stable, if unhelpful, config) and
+added real profiling instead of continuing to guess: `I_FinishUpdate()` now
+times the memcpy separately from the backpressure wait (`core0-memcpy%`),
+and `i_video_core1_step()` times the LUT-conversion loop separately from
+`write_pixels()`'s DMA feed (`core1-convert%`/`core1-dma%`) -- see
+AGENTS.md's Video section for the new stats line shape. This should finally
+show, directly, whether the ~95ms/frame is PSRAM-read-bound (conversion),
+SPI-bus-bound (DMA), or something in core0's added memcpy pass -- ⏳ not yet
+hardware-tested. Once that's known: if DMA-bound, the lever is the bus
+clock (`kPixelBaud` past 25MHz, next clk_peri/N step 30MHz, at real risk of
+pixel corruption on this shift-register panel); if convert/memcpy-bound,
+the lever is PSRAM traffic (e.g. converting straight from `screens[0]` on
+core1 without an intermediate core0 memcpy at all, at the cost of losing
+the double-buffer's safety margin -- needs more thought).
+
+**Hardware result (split timing)**: `FPS 8.6-10.4  core0-wait 14-30%
+core0-memcpy 22-26%  core1-convert 43-47%  core1-dma 43-51%`. `convert` and
+`dma` came out almost exactly 50/50 -- the palette->RGB565 LUT loop
+(reading `g_blit_buf`, PSRAM) costs nearly as much as the actual SPI
+transfer, contradicting the original "just SPI-bound" assumption. And
+`core0-memcpy` (22-26% of core0's *own* frame time) confirmed the
+architecture's real added cost: that `screens[0]`->blit-buffer copy didn't
+exist in the single-core version at all.
+
+### Phase 4.6 — Memory: get the frame buffer into SRAM (2026-09-11)
+
+Asked: could `g_blit_buf` (and ideally `screens[0]` itself) live in SRAM
+instead of PSRAM, closing both gaps above at once (no more PSRAM read
+latency in the hot convert loop, no more memcpy)? Required a real memory
+audit rather than guessing, since SRAM was already down to ~82KB free
+(`SRAM 52/134KB`) and 2 buffers need 125KB.
+
+**Why 3 buffers, not 1**: `screens[1..4]` (`doom/v_video.c`/`st_stuff.c`)
+are real, load-bearing DOOM features sharing scratch space -- `screens[1]`:
+savegame serialization buffer, the fuzz/partial-invisibility effect's
+background read, intermission-screen background restore; `screens[2]`/
+`screens[3]`: the level-transition "wipe" (melt) effect's before/after
+snapshots (`f_wipe.c`); `screens[4]`: status-bar backing store. None of
+these are our video pipeline's 3rd buffer, though -- that was our own
+`g_blit_buf[2]` (ping-pong copies of `screens[0]`) plus `screens[0]` itself.
+
+**Full `.bss`/`.data` audit** (every symbol >=400 bytes, 74 total) found the
+big SRAM consumers are almost entirely off-limits: `visplanes` (82.5KB),
+`openings` (40KB), `drawsegs`/`zlight`/`scalelight`/`ylookup`/`columnofs`
+(~30KB combined) are all rebuilt and read every single frame during the
+BSP walk -- moving them to PSRAM would slow the *renderer* more than it
+helps the blit. `g_core1_stack` (16KB, ours) is a live CPU stack, same
+problem. Genuinely cold/safe candidates (our own `sd_stdio.c`'s `s_files`
+table, `R_InitSpriteDefs`'s startup-only `sprtemp` scratch, `M_LoadDefaults`
+config buffers, etc.) totaled only ~15.6KB -- nowhere near the ~43KB
+minimum needed.
+
+**MinSizeRel build type**: measured, not assumed. `-Os` shaved ~58KB off
+`.text` (flash) but only **~1.8KB** off `.data`+`.bss` combined (SRAM) --
+declared array sizes (`visplanes[128]`, `openings[SCREENWIDTH*64]`, ...)
+don't change with optimization level. No help for this problem.
+
+**The actual find**, from reading github.com/kilograham/rp2040-doom's
+memory-optimization writeup (a *much* more constrained port -- RP2040 has
+zero PSRAM, they fit the entire engine in ~264KB SRAM; most of their
+toolkit -- 16-bit pointer compression, boolean bitsets, a custom `mobj_t`
+split -- solves a problem we don't have) and then verifying against our own
+source rather than copying blind: `finesine`/`finetangent`/`tantoangle`
+(`doom/tables.c`, ~64KB combined) looked mutable (grep found what looked
+like runtime writes in `r_main.c`) but turned out not to be --
+`R_InitPointToAngle()`/`R_InitTables()`, the *only* code that ever assigns
+to them, are both **entirely `#if 0`'d out**, with id Software's own
+comment: `// UNUSED - now getting from tables.c`. The literal initializers
+in `tables.c` are the only values ever used, on every platform, always have
+been. `const`-qualifying them under `#ifdef PICO` (`doom/tables.h`,
+`doom/tables.c`, `doom/r_main.c`'s `finecosine` pointer) moves them from
+`.data` (copied into SRAM at boot) to `.rodata` (flash, XIP-mapped) --
+confirmed via the linker map: **exactly 65536 bytes (64KB)** off `.data`,
+zero change to `.bss`, `finesine`/`finetangent`/`tantoangle` all now at
+flash addresses (`0x1000_xxxx`) with `.rodata` type.
+
+With that headroom, did the buffer-count reduction too: `I_FinishUpdate()`
+(`src/i_video_ili9486.cpp`) now ping-pongs `screens[0]` itself between two
+plain SRAM arrays (`g_screen_buf[2]`, `.bss`, 128000 bytes) instead of
+copying it into separate PSRAM blit buffers -- removing both the per-frame
+memcpy and one buffer's worth of memory outright. This is exactly the
+pointer-swap the Phase 4.5 header comment originally ruled out over a real,
+now-understood risk: `r_draw.c`'s `R_InitBuffer()` caches per-row *pointers
+into* `screens[0]` (`ylookup[i] = screens[0] + ...`), but only refreshes
+them on view-size changes (the menu's screen-size +/- keys), not every
+frame -- swap `screens[0]` without also refreshing that cache and the
+renderer keeps drawing into a stale/wrong buffer. Fixed by calling
+`R_InitBuffer(scaledviewwidth, viewheight)` again after every swap (cheap:
+`SCREENHEIGHT` pointer computations, not a per-pixel cost). First-call
+special case: `V_Init()` runs *after* `I_InitGraphics()` (`d_main.c`), so
+`screens[0]` still points at `V_Init()`'s original PSRAM allocation for the
+very first tic -- that frame's content is discarded in favor of
+`g_screen_buf[0]`'s zero-initialized (black) contents once the swap
+happens, indistinguishable from `I_InitGraphics()`'s own `fill_solid(0)`.
+The original PSRAM `screens[0]` slot (part of `V_Init()`'s contiguous
+`screens[0..3]` block) is simply never touched again -- 64000 bytes of
+PSRAM sit unused rather than being reclaimed, not worth the `v_video.c`
+change to avoid given PSRAM isn't remotely scarce.
+
+**Result** (linker map, not yet hardware-tested): SRAM budget
+(`__StackLimit - __bss_end__`) dropped from ~134KB to ~73.9KB free-for-heap
+-- expected (freed 64KB via const, spent 128KB on `g_screen_buf`, net -64KB
+-- but the goal was never "more free SRAM," it was "the frame buffer lives
+in SRAM"). With ~52KB of that already used at runtime (WAD tables, FatFs),
+headroom is ~22KB -- positive, but tighter than before. The ~15.6KB of
+still-unapplied safe relocations from the audit above (`s_files` etc.)
+remain available if more margin is needed later. ⏳ Not yet hardware-tested
+-- next stats line to watch: `core1-convert%` should drop sharply now that
+the conversion loop reads SRAM instead of PSRAM.
+
 ## Phase 3 — Input
 
 USB-PIO HID keyboard host (GPIO28/29), `src/PicoUsbKeyboard.{hpp,cpp}` +
@@ -309,6 +502,32 @@ Done state: playable with a USB keyboard. ✔ Verified on hardware.
 Port `s_sound.c` output to a single mixed 11 kHz SFX stream (DOOM mixes ~8 voices,
 2 at once typically). Timer IRQ -> DMA to PWM or a PIO DAC. Ignore music (no MIDI on
 the Pico) or replace with a simple noise/beat. Lowest priority.
+
+### USB Audio Class output -- investigated, ruled out (2026-09)
+
+Tried routing sound to a USB sound card (C-Media UAC1 adapter, VID 0x0d8c PID
+0x000c) over the same Pico-PIO-USB host port used for keyboard/mouse (Phase
+3). Confirmed infeasible without a from-scratch driver, by direct source
+inspection rather than speculation:
+
+- TinyUSB ships `class/audio/audio_device.c` only -- no host-side USB Audio
+  Class driver (`tuh_audio_*`) exists anywhere in the SDK tree.
+- Pico-PIO-USB's own host transfer engine (`pio_usb_host.c`) is built
+  entirely around the control/bulk/interrupt handshake: every transaction
+  path waits for `USB_PID_ACK`/`USB_PID_NAK` and retries on NAK
+  (`TRANSACTION_MAX_RETRY`). Isochronous transfers have no handshake phase
+  at all -- the string "isochronous" appears exactly once in the whole
+  vendored library, as an unused enum value (`EP_ATTR_ISOCHRONOUS` in
+  `usb_definitions.h`), never referenced by any transfer/scheduling code.
+  Sending an isochronous OUT transfer through this engine as-is would just
+  hang waiting for a handshake the device never sends.
+- Making this work would mean writing a new no-handshake isochronous
+  transfer path at the PIO/`pio_usb_ll` level, plus a UAC1 host driver on
+  top -- both from scratch, with no reference implementation in this
+  codebase or TOM6809 to port from (unlike every other driver so far).
+
+Decision: paused. Revisit the original plan above (PWM or PIO DAC driven
+straight off a GPIO, no USB) instead of USB Audio Class.
 
 ## Phase 5 — Polish
 

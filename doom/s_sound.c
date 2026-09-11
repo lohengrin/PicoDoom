@@ -161,14 +161,25 @@ void S_StopChannel(int cnum);
 void S_Init
 ( int		sfxVolume,
   int		musicVolume )
-{  
+{
   int		i;
 
+#ifdef PICO
+  // No audio output yet (Phase 4, deferred -- see docs/PLAN.md). Keep the
+  // volume globals valid (the menu reads/writes them regardless), but skip
+  // the channel-mixing array (channels stays NULL -- every other S_*
+  // function below is itself #ifdef PICO'd out before it would dereference
+  // that) and the per-sfx lumpnum/usefulness reset, since nothing ever
+  // caches sound data on this build.
+  fprintf( stderr, "S_Init: sound disabled (no audio output yet)\n");
+  S_SetSfxVolume(sfxVolume);
+  S_SetMusicVolume(musicVolume);
+#else
   fprintf( stderr, "S_Init: default sfx volume %d\n", sfxVolume);
 
   // Whatever these did with DMX, these are rather dummies now.
   I_SetChannels();
-  
+
   S_SetSfxVolume(sfxVolume);
   // No music with Linux - another dummy.
   S_SetMusicVolume(musicVolume);
@@ -178,17 +189,18 @@ void S_Init
   // simultaneously) within zone memory.
   channels =
     (channel_t *) Z_Malloc(numChannels*sizeof(channel_t), PU_STATIC, 0);
-  
+
   // Free all channels for use
   for (i=0 ; i<numChannels ; i++)
     channels[i].sfxinfo = 0;
-  
+
   // no sounds are playing, and they are not mus_paused
   mus_paused = 0;
 
   // Note that sounds have not been cached (yet).
   for (i=1 ; i<NUMSFX ; i++)
     S_sfx[i].lumpnum = S_sfx[i].usefulness = -1;
+#endif
 }
 
 
@@ -204,15 +216,20 @@ void S_Start(void)
   int cnum;
   int mnum;
 
+#ifdef PICO
+  // No audio output yet -- see S_Init's #ifdef PICO comment. channels[] was
+  // never allocated, and music picks/loads a WAD lump for nothing (Phase 4
+  // deferred), so nothing below is worth running.
+#else
   // kill all playing sounds at start of level
   //  (trust me - a good idea)
   for (cnum=0 ; cnum<numChannels ; cnum++)
     if (channels[cnum].sfxinfo)
       S_StopChannel(cnum);
-  
+
   // start new music for the level
   mus_paused = 0;
-  
+
   if (gamemode == commercial)
     mnum = mus_runnin + gamemap - 1;
   else
@@ -220,7 +237,7 @@ void S_Start(void)
     int spmus[]=
     {
       // Song - Who? - Where?
-      
+
       mus_e3m4,	// American	e4m1
       mus_e3m2,	// Romero	e4m2
       mus_e3m3,	// Shawn	e4m3
@@ -231,21 +248,22 @@ void S_Start(void)
       mus_e2m5,	// Shawn	e4m8
       mus_e1m9	// Tim		e4m9
     };
-    
+
     if (gameepisode < 4)
       mnum = mus_e1m1 + (gameepisode-1)*9 + gamemap-1;
     else
       mnum = spmus[gamemap-1];
-    }	
-  
+    }
+
   // HACK FOR COMMERCIAL
-  //  if (commercial && mnum > mus_e3m9)	
+  //  if (commercial && mnum > mus_e3m9)
   //      mnum -= mus_e3m9;
-  
+
   S_ChangeMusic(mnum, true);
-  
+
   nextcleanup = 15;
-}	
+#endif
+}
 
 
 
@@ -257,6 +275,10 @@ S_StartSoundAtVolume
   int		sfx_id,
   int		volume )
 {
+#ifdef PICO
+  // No audio output yet -- see S_Init's #ifdef PICO comment.
+  return;
+#else
 
   int		rc;
   int		sep;
@@ -392,7 +414,8 @@ S_StartSoundAtVolume
 				       sep,
 				       pitch,
 				       priority);
-}	
+#endif
+}
 
 void
 S_StartSound
@@ -470,6 +493,10 @@ S_StartSound
 
 void S_StopSound(void *origin)
 {
+#ifdef PICO
+  // No audio output yet -- see S_Init's #ifdef PICO comment.
+  return;
+#else
 
     int cnum;
 
@@ -481,6 +508,7 @@ void S_StopSound(void *origin)
 	    break;
 	}
     }
+#endif
 }
 
 
@@ -518,6 +546,13 @@ void S_ResumeSound(void)
 //
 void S_UpdateSounds(void* listener_p)
 {
+#ifdef PICO
+  // No audio output yet -- see S_Init's #ifdef PICO comment. Called every
+  // tic (see d_main.c), so this is the hottest of these no-ops -- worth
+  // skipping the channels[] scan entirely rather than just guarding the
+  // deref inside it.
+  return;
+#else
     int		audible;
     int		cnum;
     int		volume;
@@ -610,6 +645,7 @@ void S_UpdateSounds(void* listener_p)
     //      && !I_QrySongPlaying(mus_playing->handle)
     //      && !mus_paused )
     // S_StopMusic();
+#endif
 }
 
 
@@ -651,6 +687,13 @@ S_ChangeMusic
 ( int			musicnum,
   int			looping )
 {
+#ifdef PICO
+  // No audio output yet -- see S_Init's #ifdef PICO comment. Otherwise this
+  // would W_CacheLumpNum() a whole D_* music lump into the zone heap on
+  // every level/finale/intermission transition for a driver
+  // (i_sound_null.c) that just discards it.
+  return;
+#else
     musicinfo_t*	music;
     char		namebuf[9];
 
@@ -683,6 +726,7 @@ S_ChangeMusic
     I_PlaySong(music->handle, looping);
 
     mus_playing = music;
+#endif
 }
 
 

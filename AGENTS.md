@@ -87,20 +87,68 @@ Headless sound/net stubs implement the full symbol surface the engine references
 all sound `I_*` (Init/Start/Stop/Update/…) and `I_InitNetwork/I_NetCmd` (net now sets
 up a real single-player `doomcom`, not a no-op — see docs/PLAN.md's Phase 1 bug list).
 
-### Video: src/i_video_ili9486.cpp (Phase 2, done)
+`doom/s_sound.c` itself (the layer above `i_sound_null.c`) is `#ifdef PICO`'d out at
+each public entry point (`S_Init`/`S_Start`/`S_StartSoundAtVolume`/`S_StopSound`/
+`S_UpdateSounds`/`S_ChangeMusic`) rather than left to run for nothing against the null
+driver — it was still doing real work with no output to show for it: allocating/
+scanning the mixing `channels[]` array every tic (`S_UpdateSounds`), and, worse,
+`W_CacheLumpNum()`-loading a full music lump into the zone heap on every level/
+finale/intermission transition (`S_ChangeMusic`) only for `i_sound_null.c`'s
+`I_RegisterSong` to discard it. `S_Init` still sets `snd_SfxVolume`/`snd_MusicVolume`
+so the options menu's volume sliders keep working; it just skips the now-unused
+`channels[]` allocation, which is why every other guarded function must also stay
+guarded (`channels` is NULL under `#ifdef PICO`).
+
+### Video: src/i_video_ili9486.cpp (Phase 2, done; Phase 4.5 moved the blit to core1; Phase 4.6 moved it into SRAM)
 - DOOM renderer writes `screens[0]`: 320×200, palette-indexed (indices 0–255).
 - `I_SetPalette()` receives the PLAYPAL lump (256×3 RGB, full 8-bit values) each time
   the palette changes; rebuilds a 256-entry RGB565 (wire/big-endian) LUT via
   `gammatable[usegamma]`, matching the reference X11 driver's `UploadNewPalette`.
-- `I_FinishUpdate()` is called at the end of every tic → LUT-converts `screens[0]`
-  row by row and streams it to the panel via `Ili9486Display`, centered 1:1 (no
-  scaling) in an 80/60px black border (320×200 doesn't evenly scale to 480×320).
-  No DMA/double-buffer yet — synchronous `spi_write_blocking` per row; revisit if
-  35 fps isn't achievable (see docs/PLAN.md).
+- `I_FinishUpdate()` (core0) no longer touches the LCD directly, and no longer
+  `memcpy`s: `screens[0]` itself is ping-ponged between two plain SRAM arrays
+  (`g_screen_buf[2]`, `.bss`, 128000 bytes total) — it hands the buffer the renderer
+  just finished to core1 over the SDK inter-core FIFO, points `screens[0]` at the
+  *other* one (already confirmed free) for the renderer to draw into next, and calls
+  `R_InitBuffer(scaledviewwidth, viewheight)` to refresh `ylookup[]`/`columnofs[]`
+  against the new address — see r_draw.c note below for why that call is mandatory,
+  not optional. Only blocks if core1 hasn't freed the target buffer yet (i.e. only
+  if core1's SPI feed, not core0's game logic/render, is the bottleneck).
+  `src/i_video_core1.hpp`'s `i_video_core1_step()` does the actual work — LUT-convert
+  one row + DMA-feed it to `Ili9486Display`, one row per call — from core1's loop
+  (see below), centered 1:1 (no scaling) in an 80/60px black border. Stepped one row
+  at a time (not one blocking per-frame call) so it interleaves with `tuh_task()`
+  rather than starving Pico-PIO-USB's software-timed bus servicing for the ~41ms a
+  full frame's SPI feed takes at 25 MHz.
+- **`r_draw.c`'s `R_InitBuffer()` caches per-row pointers *into* `screens[0]`**
+  (`ylookup[i] = screens[0] + ...`), refreshed only on view-size changes (the menu's
+  screen-size +/- keys), not every frame — this is exactly why Phase 4.5 originally
+  avoided ping-ponging `screens[0]` directly. Phase 4.6 does it anyway, but calls
+  `R_InitBuffer()` itself after every swap to keep that cache valid. Any future code
+  that reassigns `screens[0]` must do the same, or the renderer silently draws into
+  a stale buffer.
 - `src/Ili9486Display.{hpp,cpp}` — low-level SPI1 driver, ported verbatim from the
   validated TOM6809 project (shift-register wire protocol, panel init sequence);
-  needs C++20 (`std::span`), hence `CMAKE_CXX_STANDARD 20`.
-- Rendering happens synchronously on core 0 in the tic loop (single-core, no RTOS).
+  needs C++20 (`std::span`), hence `CMAKE_CXX_STANDARD 20`. Only ever touched from
+  core0 during the one-time `I_InitGraphics()`/`fill_solid()` bring-up call and from
+  core1 thereafter (`i_video_core1_step()`) — never concurrently.
+- Stats line (10s interval): `core0-wait%` (backpressure — high means core1 is the
+  bottleneck), `core1-convert%` (the palette→RGB565 LUT loop — now reads SRAM, not
+  PSRAM) and `core1-dma%` (the actual `write_pixels()` SPI feed) — split so the two
+  very different-sounding hypotheses for "why isn't this faster" (RAM bandwidth vs.
+  SPI bus) show up as two different numbers instead of one opaque blended one. See
+  docs/PLAN.md's Phase 4.5/4.6 for the full history: a row-batching attempt
+  (`kRowsPerChunk=8`, since reverted to 1) made things both slower *and* caused a
+  hang after ~20s — plausibly Pico-PIO-USB's software-timed bus servicing needing
+  `tuh_task()` called more often than one chunk's worth of convert+DMA time allowed,
+  though unconfirmed; the convert/dma split then showed a near-50/50 PSRAM-vs-SPI
+  cost, which Phase 4.6 addresses by moving the buffers to SRAM.
+- `doom/tables.c`'s `finesine`/`finetangent`/`tantoangle` (~64KB) are `const` under
+  `#ifdef PICO` (`.rodata`/flash instead of `.data`/SRAM) — confirmed safe by finding
+  that `R_InitPointToAngle()`/`R_InitTables()`, the only code that ever assigns to
+  them, are both `#if 0`'d out by id Software themselves. This is what freed the SRAM
+  for `g_screen_buf` above; see docs/PLAN.md's Phase 4.6 memory audit for what was
+  and wasn't safe to relocate (most of DOOM's big SRAM users are hot renderer state —
+  `visplanes`, `openings`, etc. — genuinely not movable without slowing the renderer).
 
 ### Timing / loop
 The engine paces itself: `I_GetTime()` in tics (35 Hz, `TICRATE`), `I_StartTic`,
@@ -158,9 +206,11 @@ src/PicoDoom.cpp      # bare-metal main(): PSRAM init → sd_init() → D_DoomMa
 src/Psram.cpp/.hpp    # hardware_psram driver + psram_malloc/free (zone heap), free-list allocator
 src/sd_stdio.c        # uSD mount (pico_fatfs PIO-SPI) + newlib syscall shim (_open/_read/…)
 src/Ili9486Display.cpp/.hpp  # low-level ILI9486/SPI1 driver, ported from TOM6809
-src/i_video_ili9486.cpp      # DOOM i_video.h impl: screens[0] -> LUT -> LCD (Phase 2)
+src/i_video_ili9486.cpp      # DOOM i_video.h impl: screens[0] ping-ponged (SRAM) -> core1 -> LUT -> LCD
+src/i_video_core1.hpp        # i_video_core1_step(): one row of pending blit work, called from core1
 src/PicoUsbKeyboard.cpp/.hpp # USB-PIO HID keyboard host on core1 (Phase 3); owns the
-                              # shared tuh_hid_*_cb callbacks (TinyUSB allows only one each)
+                              # shared tuh_hid_*_cb callbacks (TinyUSB allows only one each);
+                              # core1_entry()'s loop also drives i_video_core1_step() (Phase 4.5)
 src/PicoUsbMouse.cpp/.hpp    # USB HID mouse (Phase 3), dispatched from PicoUsbKeyboard's callbacks
 src/i_input_usbhid.cpp       # I_StartTic: HID reports -> DOOM event_t/D_PostEvent
 src/tusb_config.h            # TinyUSB config: device (stdio_usb) + host (keyboard)

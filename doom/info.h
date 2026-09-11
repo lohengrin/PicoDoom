@@ -1156,7 +1156,24 @@ typedef struct
 } state_t;
 
 extern state_t	states[NUMSTATES];
+#ifdef PICO
+// R_InitSpriteDefs() (r_things.c) counts entries by scanning namelist for a
+// NULL terminator -- but vanilla sprnames[NUMSPRITES] (the #else branch)
+// has no such terminator, it's sized to exactly the 138 real names. That
+// scan reading sprnames[NUMSPRITES] is undefined behavior on any platform;
+// it happened to "work" on x86_64 Linux only because whatever data the
+// linker placed right after sprnames[] there contained a zero pointer
+// early. On this build's memory layout it doesn't -- confirmed on real
+// hardware: the scan ran 7 pointers past the real data before finding a
+// zero, and R_InitSpriteDefs() then dereferenced those garbage entries as
+// sprite name strings, hard-faulting the board. One extra slot, left to
+// C's automatic zero-init for the array elements info.c's initializer
+// doesn't cover, gives the scan a real terminator instead of relying on
+// adjacent-memory luck.
+extern char *sprnames[NUMSPRITES+1];
+#else
 extern char *sprnames[NUMSPRITES];
+#endif
 
 
 

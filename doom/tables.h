@@ -54,6 +54,23 @@
 // 0x100000000 to 0x2000
 #define ANGLETOFINESHIFT	19		
 
+// finesine/finecosine/finetangent (tables.c) are unconditionally read-only
+// at runtime: R_InitTables() (r_main.c), the only code that ever assigns to
+// finesine/finetangent, is #if 0'd out by id Software themselves ("UNUSED
+// -- now getting from tables.c") -- the literal tables.c initializers below
+// are the only values ever used, on every platform. `const` under PICO
+// lets the linker place these in flash (.rodata) instead of copying ~57KB
+// into SRAM (.data) at boot -- see docs/PLAN.md's memory-budget section.
+#ifdef PICO
+// Effective size is 10240.
+extern  const fixed_t	finesine[5*FINEANGLES/4];
+
+// Re-use data, is just PI/2 pahse shift.
+extern  const fixed_t*	finecosine;
+
+// Effective size is 4096.
+extern const fixed_t	finetangent[FINEANGLES/2];
+#else
 // Effective size is 10240.
 extern  fixed_t		finesine[5*FINEANGLES/4];
 
@@ -63,6 +80,7 @@ extern  fixed_t*	finecosine;
 
 // Effective size is 4096.
 extern fixed_t		finetangent[FINEANGLES/2];
+#endif
 
 // Binary Angle Measument, BAM.
 #define ANG45			0x20000000
@@ -81,7 +99,14 @@ typedef unsigned angle_t;
 // Effective size is 2049;
 // The +1 size is to handle the case when x==y
 //  without additional checking.
+// const under PICO: R_InitPointToAngle() (r_main.c), the only code that
+// ever assigns to this, is #if 0'd out -- see finesine's comment above,
+// same reasoning.
+#ifdef PICO
+extern const angle_t	tantoangle[SLOPERANGE+1];
+#else
 extern angle_t		tantoangle[SLOPERANGE+1];
+#endif
 
 
 // Utility function,
