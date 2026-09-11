@@ -121,6 +121,15 @@ void I_Init (void)
     //  I_InitGraphics();
 }
 
+#ifdef PICO
+// Forward-declared rather than #include "hardware/watchdog.h" -- this file
+// compiles as gnu90 (see CMakeLists.txt), and Pico SDK headers generally
+// need C11 (same reason d_main.c gets its own carve-out there). pc=0/sp=0
+// means "standard boot" (jump to the normal reset vector, same as a power
+// cycle) rather than resuming at a specific address.
+extern void watchdog_reboot(uint32_t pc, uint32_t sp, uint32_t delay_ms);
+#endif
+
 //
 // I_Quit
 //
@@ -131,7 +140,18 @@ void I_Quit (void)
     I_ShutdownMusic();
     M_SaveDefaults ();
     I_ShutdownGraphics();
+#ifdef PICO
+    // No OS to return to -- exit()/_exit() has nothing meaningful to do on
+    // bare metal. Full chip reboot instead: the watchdog fires after
+    // delay_ms and the board comes back up through the normal boot sequence,
+    // same as a power cycle.
+    printf("PicoDoom: quitting -- rebooting...\n");
+    watchdog_reboot(0, 0, 100);
+    for (;;)
+	; // watchdog_reboot() only arms the reset; wait for it to fire.
+#else
     exit(0);
+#endif
 }
 
 void I_WaitVBL(int count)

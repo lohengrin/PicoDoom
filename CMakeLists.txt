@@ -176,8 +176,9 @@ ${DOOMSRC}
 # pico_fatfs (uSD/FatFs), hardware_psram (QMI PSRAM), hardware_pio (PIO-SPI
 # base=16 for the uSD), hardware_spi + hardware_dma (ILI9486 LCD over SPI1,
 # DMA-fed pixel pushes), pico_pio_usb + tinyusb_host + pico_multicore
-# (Phase 3 USB-PIO keyboard host on core1, see src/PicoUsbKeyboard.cpp), on
-# top of pico_stdlib.
+# (Phase 3 USB-PIO keyboard host on core1, see src/PicoUsbKeyboard.cpp),
+# hardware_watchdog (Phase 5, I_Quit -> watchdog_reboot()), on top of
+# pico_stdlib.
 target_link_libraries(PicoDoom
     pico_stdlib
     pico_fatfs
@@ -188,6 +189,7 @@ target_link_libraries(PicoDoom
     pico_pio_usb
     tinyusb_host
     pico_multicore
+    hardware_watchdog
 )
 
 target_include_directories(PicoDoom PRIVATE

@@ -640,12 +640,56 @@ inspection rather than speculation:
 Decision: paused. Revisit the original plan above (PWM or PIO DAC driven
 straight off a GPIO, no USB) instead of USB Audio Class.
 
-## Phase 5 — Polish
+## Phase 5 — Polish (2026-09-11)
 
-- Save games to µSD (p_saveg already uses files via w_wad/m_misc -> FS shim).
-- Pause button, on-screen FPS, doomstat console.
-- `I_Quit` -> reboot instead of exit.
-- Update README.md (stale: still describes the PCIRAM SSD1306 demo).
+- **`I_Quit` -> reboot instead of exit.** ✔ Done. `doom/i_system.c`: newlib's
+  default `exit()`/`_exit()` on this bare-metal build just hangs the CPU
+  forever (confirmed in the Pico SDK's `crt0.S` -- "calls exit (which should
+  eventually hang the processor via `_exit`)"), leaving the board frozen
+  until a manual power cycle. `I_Quit()` now calls `watchdog_reboot(0, 0,
+  100)` under `#ifdef PICO` instead -- a full chip reboot back through the
+  normal boot sequence, same as a power cycle, after a brief delay. Forward-
+  declared `watchdog_reboot()` rather than `#include`ing `hardware/
+  watchdog.h` -- this file compiles as gnu90 (see CMakeLists.txt), and Pico
+  SDK headers generally need C11 (same reason `d_main.c` has its own
+  carve-out). `I_Error()` deliberately left unchanged (still prints +
+  hangs) -- this whole project's debugging has depended on reading its
+  message off the serial console; an immediate reboot on a real crash would
+  erase that. Added `hardware_watchdog` to `target_link_libraries`.
+  ⏳ Not yet hardware-tested.
+- **Pause.** ✔ Already done, no change needed, ✔ verified on hardware:
+  `KEY_PAUSE` (HID usage 0x48, a keyboard's dedicated Pause key) is already
+  mapped in `src/i_input_usbhid.cpp`'s HID->DOOM keycode table, wired
+  straight into vanilla DOOM's own pause handling (`sendpause`/`paused` in
+  `doom/g_game.c`). This board has no onboard physical buttons to wire up
+  as an alternative (checked `boards/waveshare_rp2350_pizero.h`).
+- **Save games to µSD.** ✔ Verified on hardware, both directions
+  (save-then-load). Reviewed, not changed: `p_saveg.c`/`g_game.c`'s
+  `G_DoSaveGame`/`G_DoLoadGame` and `m_menu.c`'s `M_ReadSaveStrings` all go
+  through plain `open`/`read`/`write`/`close` (`doom/m_misc.c`'s
+  `M_WriteFile`/`M_ReadFile` do too) -- the exact same `_open`/`_read`/
+  `_write`/`_close` syscalls `src/sd_stdio.c` already implements and that
+  WAD loading has exercised since Phase 1. `_open()` already handles
+  `O_CREAT|O_TRUNC` (maps to FatFs's `FA_CREATE_ALWAYS`) for writing new
+  saves, and `M_ReadSaveStrings` already handles a missing/nonexistent save
+  slot gracefully (`open()` returning -1 -> empty slot, not a crash). None
+  of this session's earlier type-size fixes (`ticcmd_t`, `event_t`,
+  `maptexture_t`, etc.) touch anything `p_saveg.c` serializes, and savegames
+  are self-consistent regardless of struct layout since the same build
+  always reads what it wrote.
+- **On-screen FPS / doomstat console.** Not started -- deferred. Needs real
+  design work, not a quick add: DOOM has no built-in on-screen counter (a
+  modern-source-port feature, not in 1993 vanilla), so this means either a
+  custom bitmap-font stamped onto the RGB565 buffer during core1's convert
+  pass (own code, `i_video_core1_step()`, no `doom/` changes -- can render
+  into the unused 80/60px black border around the 320x200 view, avoiding
+  any interference with actual gameplay) or hooking into `st_stuff.c`'s
+  status-bar widget system (touches `doom/`, more invasive). Leaning toward
+  the former; not implemented yet.
+- **README.md.** ✔ Done -- was entirely the old PiCoMonitor/SSD1306 project's
+  README. Rewritten to describe PicoDoom: hardware, build/flash
+  instructions, controls, current status, pointers to docs/PLAN.md and
+  AGENTS.md for detail.
 
 ## Key engine facts
 
