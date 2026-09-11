@@ -103,50 +103,67 @@ int			dccount;
 // Thus a special case loop for very fast rendering can
 //  be used. It has also been used with Wolfenstein 3D.
 // 
-void R_DrawColumn (void) 
-{ 
-    int			count; 
-    byte*		dest; 
+void R_DrawColumn (void)
+{
+    int			count;
+    byte*		dest;
     fixed_t		frac;
-    fixed_t		fracstep;	 
- 
-    count = dc_yh - dc_yl; 
+    fixed_t		fracstep;
+#ifdef PICO
+    // dc_source/dc_colormap are re-loaded from memory on every iteration of
+    // the loop below (confirmed via disassembly on this toolchain) even
+    // though neither changes across it -- GCC can't rule out that the
+    // *dest store aliases the global pointer variables themselves without
+    // whole-program visibility. Caching them in locals removes 2 LDRs per
+    // pixel from the single hottest inner loop in the renderer. Not a new
+    // idea: id Software's own (unused, see below) loop-unrolled reference
+    // version of this function already does exactly this -- same fix,
+    // just applied to the version that's actually active.
+    const byte* source = dc_source;
+    const lighttable_t* colormap = dc_colormap;
+#endif
+
+    count = dc_yh - dc_yl;
 
     // Zero length, column does not exceed a pixel.
-    if (count < 0) 
-	return; 
-				 
-#ifdef RANGECHECK 
+    if (count < 0)
+	return;
+
+#ifdef RANGECHECK
     if ((unsigned)dc_x >= SCREENWIDTH
 	|| dc_yl < 0
-	|| dc_yh >= SCREENHEIGHT) 
-	I_Error ("R_DrawColumn: %i to %i at %i", dc_yl, dc_yh, dc_x); 
-#endif 
+	|| dc_yh >= SCREENHEIGHT)
+	I_Error ("R_DrawColumn: %i to %i at %i", dc_yl, dc_yh, dc_x);
+#endif
 
     // Framebuffer destination address.
     // Use ylookup LUT to avoid multiply with ScreenWidth.
-    // Use columnofs LUT for subwindows? 
-    dest = ylookup[dc_yl] + columnofs[dc_x];  
+    // Use columnofs LUT for subwindows?
+    dest = ylookup[dc_yl] + columnofs[dc_x];
 
     // Determine scaling,
     //  which is the only mapping to be done.
-    fracstep = dc_iscale; 
-    frac = dc_texturemid + (dc_yl-centery)*fracstep; 
+    fracstep = dc_iscale;
+    frac = dc_texturemid + (dc_yl-centery)*fracstep;
 
     // Inner loop that does the actual texture mapping,
     //  e.g. a DDA-lile scaling.
     // This is as fast as it gets.
-    do 
+    do
     {
 	// Re-map color indices from wall texture column
 	//  using a lighting/special effects LUT.
+#ifdef PICO
+	*dest = colormap[source[(frac>>FRACBITS)&127]];
+#else
 	*dest = dc_colormap[dc_source[(frac>>FRACBITS)&127]];
-	
-	dest += SCREENWIDTH; 
+#endif
+
+	dest += SCREENWIDTH;
 	frac += fracstep;
-	
-    } while (count--); 
-} 
+
+    } while (count--);
+}
 
 
 
@@ -209,15 +226,20 @@ void R_DrawColumn (void)
 #endif
 
 
-void R_DrawColumnLow (void) 
-{ 
-    int			count; 
-    byte*		dest; 
+void R_DrawColumnLow (void)
+{
+    int			count;
+    byte*		dest;
     byte*		dest2;
     fixed_t		frac;
-    fixed_t		fracstep;	 
- 
-    count = dc_yh - dc_yl; 
+    fixed_t		fracstep;
+#ifdef PICO
+    // See R_DrawColumn's #ifdef PICO comment -- same reload, same fix.
+    const byte* source = dc_source;
+    const lighttable_t* colormap = dc_colormap;
+#endif
+
+    count = dc_yh - dc_yl;
 
     // Zero length.
     if (count < 0) 
@@ -242,13 +264,17 @@ void R_DrawColumnLow (void)
     fracstep = dc_iscale; 
     frac = dc_texturemid + (dc_yl-centery)*fracstep;
     
-    do 
+    do
     {
 	// Hack. Does not work corretly.
+#ifdef PICO
+	*dest2 = *dest = colormap[source[(frac>>FRACBITS)&127]];
+#else
 	*dest2 = *dest = dc_colormap[dc_source[(frac>>FRACBITS)&127]];
+#endif
 	dest += SCREENWIDTH;
 	dest2 += SCREENWIDTH;
-	frac += fracstep; 
+	frac += fracstep;
 
     } while (count--);
 }
@@ -383,16 +409,23 @@ void R_DrawFuzzColumn (void)
 byte*	dc_translation;
 byte*	translationtables;
 
-void R_DrawTranslatedColumn (void) 
-{ 
-    int			count; 
-    byte*		dest; 
+void R_DrawTranslatedColumn (void)
+{
+    int			count;
+    byte*		dest;
     fixed_t		frac;
-    fixed_t		fracstep;	 
- 
-    count = dc_yh - dc_yl; 
-    if (count < 0) 
-	return; 
+    fixed_t		fracstep;
+#ifdef PICO
+    // See R_DrawColumn's #ifdef PICO comment -- same reload, same fix,
+    // one more level of indirection (dc_translation) here.
+    const byte* source = dc_source;
+    const byte* translation = dc_translation;
+    const lighttable_t* colormap = dc_colormap;
+#endif
+
+    count = dc_yh - dc_yl;
+    if (count < 0)
+	return;
 				 
 #ifdef RANGECHECK 
     if ((unsigned)dc_x >= SCREENWIDTH
@@ -439,12 +472,16 @@ void R_DrawTranslatedColumn (void)
 	//  to map certain colorramps to other ones,
 	//  used with PLAY sprites.
 	// Thus the "green" ramp of the player 0 sprite
-	//  is mapped to gray, red, black/indigo. 
+	//  is mapped to gray, red, black/indigo.
+#ifdef PICO
+	*dest = colormap[translation[source[frac>>FRACBITS]]];
+#else
 	*dest = dc_colormap[dc_translation[dc_source[frac>>FRACBITS]]];
+#endif
 	dest += SCREENWIDTH;
-	
-	frac += fracstep; 
-    } while (count--); 
+
+	frac += fracstep;
+    } while (count--);
 } 
 
 
@@ -518,50 +555,67 @@ int			dscount;
 
 //
 // Draws the actual span.
-void R_DrawSpan (void) 
-{ 
+void R_DrawSpan (void)
+{
     fixed_t		xfrac;
-    fixed_t		yfrac; 
-    byte*		dest; 
+    fixed_t		yfrac;
+    byte*		dest;
     int			count;
-    int			spot; 
-	 
-#ifdef RANGECHECK 
+    int			spot;
+#ifdef PICO
+    // See R_DrawColumn's #ifdef PICO comment -- same reload pattern here,
+    // for all four of ds_source/ds_colormap/ds_xstep/ds_ystep.
+    const byte* source = ds_source;
+    const lighttable_t* colormap = ds_colormap;
+    const fixed_t xstep = ds_xstep;
+    const fixed_t ystep = ds_ystep;
+#endif
+
+#ifdef RANGECHECK
     if (ds_x2 < ds_x1
 	|| ds_x1<0
-	|| ds_x2>=SCREENWIDTH  
+	|| ds_x2>=SCREENWIDTH
 	|| (unsigned)ds_y>SCREENHEIGHT)
     {
 	I_Error( "R_DrawSpan: %i to %i at %i",
 		 ds_x1,ds_x2,ds_y);
     }
-//	dscount++; 
-#endif 
+//	dscount++;
+#endif
 
-    
-    xfrac = ds_xfrac; 
-    yfrac = ds_yfrac; 
-	 
+
+    xfrac = ds_xfrac;
+    yfrac = ds_yfrac;
+
     dest = ylookup[ds_y] + columnofs[ds_x1];
 
     // We do not check for zero spans here?
-    count = ds_x2 - ds_x1; 
+    count = ds_x2 - ds_x1;
 
-    do 
+    do
     {
 	// Current texture index in u,v.
 	spot = ((yfrac>>(16-6))&(63*64)) + ((xfrac>>16)&63);
 
 	// Lookup pixel from flat texture tile,
 	//  re-index using light/colormap.
+#ifdef PICO
+	*dest++ = colormap[source[spot]];
+#else
 	*dest++ = ds_colormap[ds_source[spot]];
+#endif
 
 	// Next step in u,v.
-	xfrac += ds_xstep; 
+#ifdef PICO
+	xfrac += xstep;
+	yfrac += ystep;
+#else
+	xfrac += ds_xstep;
 	yfrac += ds_ystep;
-	
-    } while (count--); 
-} 
+#endif
+
+    } while (count--);
+}
 
 
 
@@ -641,49 +695,68 @@ void R_DrawSpan (void)
 //
 // Again..
 //
-void R_DrawSpanLow (void) 
-{ 
+void R_DrawSpanLow (void)
+{
     fixed_t		xfrac;
-    fixed_t		yfrac; 
-    byte*		dest; 
+    fixed_t		yfrac;
+    byte*		dest;
     int			count;
-    int			spot; 
-	 
-#ifdef RANGECHECK 
+    int			spot;
+#ifdef PICO
+    // See R_DrawColumn's #ifdef PICO comment -- same reload pattern, worse
+    // here since this variant writes 2 pixels per source lookup (blocky/
+    // low-detail mode), doubling how often the reload would otherwise bite.
+    const byte* source = ds_source;
+    const lighttable_t* colormap = ds_colormap;
+    const fixed_t xstep = ds_xstep;
+    const fixed_t ystep = ds_ystep;
+#endif
+
+#ifdef RANGECHECK
     if (ds_x2 < ds_x1
 	|| ds_x1<0
-	|| ds_x2>=SCREENWIDTH  
+	|| ds_x2>=SCREENWIDTH
 	|| (unsigned)ds_y>SCREENHEIGHT)
     {
 	I_Error( "R_DrawSpan: %i to %i at %i",
 		 ds_x1,ds_x2,ds_y);
     }
-//	dscount++; 
-#endif 
-	 
-    xfrac = ds_xfrac; 
-    yfrac = ds_yfrac; 
+//	dscount++;
+#endif
+
+    xfrac = ds_xfrac;
+    yfrac = ds_yfrac;
 
     // Blocky mode, need to multiply by 2.
     ds_x1 <<= 1;
     ds_x2 <<= 1;
-    
+
     dest = ylookup[ds_y] + columnofs[ds_x1];
-  
-    
-    count = ds_x2 - ds_x1; 
-    do 
-    { 
+
+
+    count = ds_x2 - ds_x1;
+    do
+    {
 	spot = ((yfrac>>(16-6))&(63*64)) + ((xfrac>>16)&63);
 	// Lowres/blocky mode does it twice,
 	//  while scale is adjusted appropriately.
-	*dest++ = ds_colormap[ds_source[spot]]; 
+#ifdef PICO
+	*dest++ = colormap[source[spot]];
+	*dest++ = colormap[source[spot]];
+#else
 	*dest++ = ds_colormap[ds_source[spot]];
-	
-	xfrac += ds_xstep; 
-	yfrac += ds_ystep; 
+	*dest++ = ds_colormap[ds_source[spot]];
+#endif
 
-    } while (count--); 
+#ifdef PICO
+	xfrac += xstep;
+	yfrac += ystep;
+#else
+	xfrac += ds_xstep;
+	yfrac += ds_ystep;
+#endif
+
+    } while (count--);
 }
 
 //

@@ -16,38 +16,37 @@
 // i_video_core1.hpp) so core0 can start the next tic instead of blocking on
 // the ~41ms SPI transfer.
 //
-// Phase 4.6 (memory): screens[0] itself is ping-ponged between two
-// SRAM-resident buffers (g_screen_buf[2]) instead of copying it into
-// separate PSRAM blit buffers every frame -- the earlier design deliberately
-// avoided this (see git history) over a real concern: v_video.c's V_Init()
-// allocates screens[0..3] as one contiguous PSRAM block, and r_draw.c's
-// R_InitBuffer() caches per-row POINTERS INTO screens[0] (`ylookup[i] =
-// screens[0] + ...`) -- but only refreshes them when the view size changes
-// (menu screen-size +/-), not every frame. Swapping screens[0] without
-// also refreshing that cache left the renderer drawing into a stale
-// buffer. Fixed by calling R_InitBuffer() again ourselves after every
-// swap (cheap: SCREENHEIGHT pointer computations, not a per-pixel cost).
-// This removes both the per-frame memcpy (g_memcpy_us_in_window, gone) and
-// one whole buffer's worth of PSRAM -- and, the actual point, fits both
-// buffers in SRAM instead: freed via making doom/tables.c's
-// finesine/finetangent/tantoangle `const` (~64KB back to .rodata/flash --
-// see docs/PLAN.md; they turned out to be unconditionally read-only, the
-// runtime-rewrite code that made them look mutable is `#if 0`'d out by id
-// Software themselves). g_screen_buf being SRAM also means core1's
-// palette->RGB565 conversion loop now reads SRAM instead of PSRAM -- the
-// other half of what was costing ~50% of core1's blit time per the
-// core1-convert/core1-dma stats split.
+// Phase 4.6 tried ping-ponging screens[0] itself between two buffers
+// instead of memcpy'ing it into separate ones every frame, to kill the
+// memcpy and get some of screens[0] into SRAM. Reverted (Phase 4.6.2):
+// v_video.c's V_Init() allocates screens[0..3] as one contiguous block,
+// and it turns out more than one thing in the engine assumes screens[0]'s
+// *address* stays stable across many tics, not just within one --
+// r_draw.c's R_InitBuffer() caches per-row pointers into it (`ylookup[i] =
+// screens[0] + ...`, fixed by re-running R_InitBuffer() after every swap),
+// but also: doom/st_stuff.c's status bar does incremental "diff" redraws
+// (ST_diffDraw()/STlib_update*()) that skip repainting a widget if its
+// value hasn't changed, relying on last tic's pixels still being there;
+// doom/f_wipe.c's level-transition melt effect caches `wipe_scr =
+// screens[0]` ONCE at the start of a multi-tic animation and keeps writing
+// into that same captured pointer for its whole duration. Both silently
+// break if screens[0] points somewhere else by the time they run again --
+// confirmed on real hardware as corrupted/blinking status bar and
+// transition screens. Not a one-off fix like R_InitBuffer(): unlike a
+// pointer *cache* that can be refreshed, these assume *content*
+// persists across frames, which a ping-ponged buffer fundamentally can't
+// guarantee. So: screens[0] is never touched here again, back to
+// memcpy'ing it into g_screen_buf[next] (one SRAM, one PSRAM, unchanged
+// from Phase 4.6.1 -- see that buffer's own doc comment) each frame and
+// handing the index to core1, same shape as the original Phase 4.5 design.
 #include "Ili9486Display.hpp"
 #include "Psram.hpp"
 #include "i_video_core1.hpp"
 
 extern "C" {
 #include "doomdef.h"
-#include "doomstat.h"
 #include "i_video.h"
 #include "i_system.h"
-#include "r_defs.h"
-#include "r_draw.h"
 #include "v_video.h"
 }
 
@@ -102,19 +101,25 @@ int g_xsrc[kDstWidth];
 int g_ysrc[kDstHeight];
 
 // --- core0 -> core1 blit handoff (ping-pong, see file header) ---
-// screens[0] itself points into one of these at any given time -- SRAM
-// (not psram_malloc'd), which is the actual point of the Phase 4.6 change:
-// core1's conversion loop reads this directly instead of a PSRAM copy.
-// .bss (zero-initialized) rather than an explicit memset -- the one frame
-// this shows before the renderer has drawn anything (see the first-call
-// handling in I_FinishUpdate()) comes out black, same as I_InitGraphics's
-// own fill_solid(0).
-byte g_screen_buf[2][SCREENWIDTH * SCREENHEIGHT];
-// true = free for the renderer (screens[0]) to draw into. Flip conventions
-// match PicoUsbKeyboard.cpp's g_active_buf: plain volatile bool, one writer
-// per flag direction (core0 only ever clears its target index, core1 only
-// ever sets the index it just finished), safe on this platform without a
-// lock.
+// I_FinishUpdate() memcpy's screens[0] into whichever of these is free;
+// core1 converts+feeds from its own copy, then flags that slot free again.
+// Slot 0 is a plain SRAM static array; slot 1 is psram_malloc'd in
+// I_InitGraphics(). Deliberately asymmetric, not both-SRAM: Phase 4.6.1
+// found that putting 128000 bytes of buffers in SRAM shrank the newlib
+// heap budget enough (~134KB -> ~74KB) that W_Init() loading this WAD's
+// directory table (a full commercial IWAD, ~2900+ lumps) hit the SDK's
+// malloc-panics-past-__StackLimit guard ("*** PANIC *** Out of memory")
+// before the game even reached the title screen. One SRAM slot gives back
+// ~62.5KB of the ~64KB the const-ified trig tables freed (see
+// doc/PLAN.md), landing the heap budget roughly back at what already
+// proved sufficient to load this exact WAD -- and still gets core1's
+// convert loop reading SRAM every other frame instead of never.
+byte g_screen_buf0[SCREENWIDTH * SCREENHEIGHT];
+byte* g_screen_buf[2] = {g_screen_buf0, nullptr};
+// true = free for core0 to memcpy screens[0] into. Flip conventions match
+// PicoUsbKeyboard.cpp's g_active_buf: plain volatile bool, one writer per
+// flag direction (core0 only ever clears its target index, core1 only ever
+// sets the index it just finished), safe on this platform without a lock.
 volatile bool g_blit_buf_free[2] = {true, true};
 
 // --- Stats line (SRAM/PSRAM usage, FPS, timing breakdown) ---
@@ -125,16 +130,18 @@ volatile bool g_blit_buf_free[2] = {true, true};
 // zone heap + screen buffer (see doom/i_system.c, i_video_ili9486.cpp).
 // "wait%" is core0's own I_FinishUpdate() time spent blocked on backpressure
 // (waiting for core1 to free a buffer) -- 0% means core0 is the bottleneck
-// (game logic/render), high% means core1's blit is. "convert%"/"dma%" split
-// core1's own per-frame time (relative to the stats window) between the
-// palette->RGB565 LUT loop and the actual write_pixels() SPI feed -- added
-// to find where the ~95ms/frame single-core-equivalent blit time was
-// actually going; now that g_screen_buf is SRAM (Phase 4.6), convert% is
-// the number to watch to confirm that actually helped.
+// (game logic/render), high% means core1's blit is. "memcpy%" is core0's
+// screens[0]->g_screen_buf copy, also relative to its own frame time (back
+// since Phase 4.6.2 reverted the screens[0]-ping-pong that had removed it
+// -- see file header). "convert%"/"dma%" split core1's own per-frame time
+// (relative to the stats window) between the palette->RGB565 LUT loop
+// (SRAM every other frame, PSRAM the frames in between -- see
+// g_screen_buf's doc comment) and the actual write_pixels() SPI feed.
 uint64_t g_last_frame_start_us = 0;
 uint64_t g_stats_window_start_us = 0;
 uint32_t g_frames_in_window = 0;
 uint64_t g_wait_us_in_window = 0;
+uint64_t g_memcpy_us_in_window = 0;
 uint64_t g_frame_us_in_window = 0;
 
 // Written by core1 (i_video_core1_step, after each row/chunk), read and
@@ -158,6 +165,9 @@ void report_stats_if_due(uint64_t now_us) {
     float wait_pct = g_frame_us_in_window
         ? 100.0f * static_cast<float>(g_wait_us_in_window) / static_cast<float>(g_frame_us_in_window)
         : 0.0f;
+    float memcpy_pct = g_frame_us_in_window
+        ? 100.0f * static_cast<float>(g_memcpy_us_in_window) / static_cast<float>(g_frame_us_in_window)
+        : 0.0f;
     float convert_pct = elapsed_us
         ? 100.0f * static_cast<float>(g_core1_convert_us_accum) / static_cast<float>(elapsed_us)
         : 0.0f;
@@ -172,14 +182,15 @@ void report_stats_if_due(uint64_t now_us) {
     size_t psram_total = psram_status().size_bytes;
 
     printf("PicoDoom: SRAM %u/%uKB  PSRAM %u/%uKB  FPS %.1f  "
-           "core0-wait %.0f%%  core1-convert %.0f%%  core1-dma %.0f%%\n",
+           "core0-wait %.0f%%  core0-memcpy %.0f%%  core1-convert %.0f%%  core1-dma %.0f%%\n",
            static_cast<unsigned>(sram_used / 1024), static_cast<unsigned>(sram_total / 1024),
            static_cast<unsigned>(psram_used / 1024), static_cast<unsigned>(psram_total / 1024),
-           fps, wait_pct, convert_pct, dma_pct);
+           fps, wait_pct, memcpy_pct, convert_pct, dma_pct);
 
     g_stats_window_start_us = now_us;
     g_frames_in_window = 0;
     g_wait_us_in_window = 0;
+    g_memcpy_us_in_window = 0;
     g_frame_us_in_window = 0;
     g_core1_convert_us_accum = 0;
     g_core1_dma_us_accum = 0;
@@ -201,9 +212,19 @@ void I_InitGraphics(void) {
     // from src/PicoDoom.cpp before D_DoomMain()) and will start calling
     // i_video_core1_step() immediately -- but g_blit_buf_free starts all-true
     // and the inter-core FIFO starts empty, so it just no-ops until
-    // I_FinishUpdate() below ever pushes an index. g_screen_buf itself is a
-    // plain static array (see its doc comment) -- nothing to allocate here
-    // anymore.
+    // I_FinishUpdate() below ever pushes an index. g_screen_buf[0] is a
+    // plain static array (see its doc comment); g_screen_buf[1] is
+    // PSRAM-backed, allocated once here, same pattern (and failure handling)
+    // as the pre-Phase-4.6 blit buffers.
+    g_screen_buf[1] = static_cast<byte*>(psram_malloc(SCREENWIDTH * SCREENHEIGHT));
+    if (!g_screen_buf[1])
+        // I_Error's signature predates `const` (1993 C) -- cast, not a
+        // real mutation.
+        I_Error(const_cast<char*>("I_InitGraphics: failed to allocate blit buffer"));
+    // Not load-bearing (I_FinishUpdate() always memcpy's into a slot before
+    // it's ever handed to core1), just avoids a stray uninitialized-PSRAM
+    // read if that ever stops being true.
+    memset(g_screen_buf[1], 0, SCREENWIDTH * SCREENHEIGHT);
 
     g_display.init();
     // Black out the whole panel once, independent of any palette/game state
@@ -233,54 +254,35 @@ void I_SetPalette(byte* palette) {
 void I_UpdateNoBlit(void) {}
 
 void I_FinishUpdate(void) {
-    // active_idx: which g_screen_buf[] slot screens[0] currently points to
-    // (i.e. what the renderer just finished drawing into). Static local --
-    // this function is the only reader/writer, nothing else needs to see it.
-    static int active_idx = -1;
+    // Ping-pong: alternate which buffer this call targets. Static local
+    // instead of a namespace global -- this function is the only writer,
+    // nothing else needs to see it.
+    static int next_idx = 0;
 
     uint64_t frame_start_us = time_us_64();
     if (g_last_frame_start_us != 0)
         g_frame_us_in_window += frame_start_us - g_last_frame_start_us;
     g_last_frame_start_us = frame_start_us;
 
-    if (active_idx < 0) {
-        // First call: screens[0] still points at V_Init()'s original PSRAM
-        // buffer (V_Init() runs after I_InitGraphics(), so this couldn't be
-        // done any earlier -- see file header). Whatever the renderer drew
-        // into that buffer for this first tic is discarded in favor of
-        // g_screen_buf[0]'s zero-initialized (black) contents -- matches
-        // I_InitGraphics()'s own fill_solid(0), not a visible regression.
-        // R_InitBuffer() must run again against the new screens[0] before
-        // the *next* tic renders, or ylookup[]/columnofs[] stay stale --
-        // see file header.
-        screens[0] = g_screen_buf[0];
-        R_InitBuffer(scaledviewwidth, viewheight);
-        active_idx = 0;
-    }
-
-    // Backpressure: only blocks if core1 hasn't finished blitting the
-    // *other* buffer from two frames ago yet, i.e. if core1's SPI feed is
-    // the bottleneck rather than core0's game logic/render -- see
-    // g_wait_us's doc comment above. Must resolve before the renderer is
-    // allowed to start drawing into that buffer as the new screens[0].
-    int next_idx = 1 - active_idx;
-    uint64_t wait_start_us = time_us_64();
+    // Backpressure: only blocks if core1 hasn't finished blitting this same
+    // buffer from two frames ago yet, i.e. if core1's SPI feed is the
+    // bottleneck rather than core0's game logic/render -- see g_wait_us's
+    // doc comment above.
+    uint64_t wait_start_us = frame_start_us;
     while (!g_blit_buf_free[next_idx])
         tight_loop_contents();
+    uint64_t memcpy_start_us = time_us_64();
+    g_wait_us_in_window += memcpy_start_us - wait_start_us;
+
+    // screens[0] itself is never touched here (see file header) -- just
+    // copied out. core1 reads its own copy from here on.
+    memcpy(g_screen_buf[next_idx], screens[0], SCREENWIDTH * SCREENHEIGHT);
     uint64_t now_us = time_us_64();
-    g_wait_us_in_window += now_us - wait_start_us;
+    g_memcpy_us_in_window += now_us - memcpy_start_us;
 
-    // Hand off the buffer the renderer just finished (still screens[0]) to
-    // core1 -- no copy, core1 reads g_screen_buf[active_idx] directly.
-    g_blit_buf_free[active_idx] = false;
-    multicore_fifo_push_blocking(static_cast<uint32_t>(active_idx));
-
-    // Point screens[0] at the other (already-confirmed-free) buffer for the
-    // renderer to draw the next tic into, and refresh ylookup[]/columnofs[]
-    // to match -- see file header.
-    screens[0] = g_screen_buf[next_idx];
-    R_InitBuffer(scaledviewwidth, viewheight);
-    active_idx = next_idx;
+    g_blit_buf_free[next_idx] = false;
+    multicore_fifo_push_blocking(static_cast<uint32_t>(next_idx));
+    next_idx ^= 1;
 
     ++g_frames_in_window;
     report_stats_if_due(now_us);

@@ -24,7 +24,11 @@ static void fatal(const char* msg)
 int main(void)
 {
     stdio_init_all();
-    sleep_ms(2000); // Give host time to attach terminal
+    // Wait up to 5 seconds (5000 ms) for a USB CDC terminal to attach
+    absolute_time_t timeout = make_timeout_time_ms(5000);
+    while (!stdio_usb_connected() && !time_reached(timeout)) {
+        sleep_ms(100);
+    }
 
     printf("PicoDoom boot\n");
 

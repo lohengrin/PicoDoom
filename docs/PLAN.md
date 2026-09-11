@@ -420,16 +420,127 @@ The original PSRAM `screens[0]` slot (part of `V_Init()`'s contiguous
 PSRAM sit unused rather than being reclaimed, not worth the `v_video.c`
 change to avoid given PSRAM isn't remotely scarce.
 
-**Result** (linker map, not yet hardware-tested): SRAM budget
-(`__StackLimit - __bss_end__`) dropped from ~134KB to ~73.9KB free-for-heap
--- expected (freed 64KB via const, spent 128KB on `g_screen_buf`, net -64KB
--- but the goal was never "more free SRAM," it was "the frame buffer lives
-in SRAM"). With ~52KB of that already used at runtime (WAD tables, FatFs),
-headroom is ~22KB -- positive, but tighter than before. The ~15.6KB of
-still-unapplied safe relocations from the audit above (`s_files` etc.)
-remain available if more margin is needed later. ⏳ Not yet hardware-tested
--- next stats line to watch: `core1-convert%` should drop sharply now that
-the conversion loop reads SRAM instead of PSRAM.
+**Result, first cut**: linker map showed SRAM budget (`__StackLimit -
+__bss_end__`) dropping from ~134KB to ~73.9KB free-for-heap -- expected
+(freed 64KB via const, spent 128KB on `g_screen_buf`, net -64KB). Estimated
+~22KB headroom from the ~52KB *steady-state* (in-gameplay) usage reported
+by an earlier stats line, and judged that positive-but-tighter margin
+acceptable.
+
+**That estimate was wrong on hardware**: flashed and got `*** PANIC ***
+Out of memory` during `W_Init()` -- `adding doom.wad` -- before the game
+even reached the title screen. This is the Pico SDK's `pico_malloc`
+wrapper (`src/rp2_common/pico_malloc/malloc.c`'s `check_alloc()`), which
+panics if the heap grows past `__StackLimit`. The ~52KB figure was
+*post*-load steady state; loading this WAD's directory table (a full
+commercial IWAD, ~2900+ lumps) apparently needs more than the ~73.9KB
+budget at its *peak*, during the load itself -- a distinction the earlier
+estimate didn't account for.
+
+**Phase 4.6.1 fix**: only `g_screen_buf[0]` is SRAM (plain static array);
+`g_screen_buf[1]` is back to `psram_malloc`, same pattern as the original
+pre-Phase-4.6 blit buffers (`src/i_video_ili9486.cpp`). Gives back ~62.5KB
+of the ~64KB the const-ified trig tables freed. New budget (confirmed via
+linker map): **136.4KB** free-for-heap -- slightly *more* than the original
+pre-Phase-4.6 baseline that already proved sufficient to load this exact
+WAD, so this should be solidly past the panic threshold, not just barely
+past it. Trade-off: only half of core1's convert-loop benefit remains
+(alternates SRAM/PSRAM reads frame to frame, screens[0] ping-pongs between
+the two slots) instead of the full SRAM win Phase 4.6 was aiming for.
+
+**Hardware result**: panic fixed, boots and plays. FPS ~13-15 (up from
+~10.5 pre-Phase-4.6), `core1-convert` dropped to 23-29% (from ~45%
+fully-PSRAM) confirming the partial SRAM win landed, `core1-dma` rose to
+64-74% (now the dominant cost, as expected once convert got cheaper).
+
+**But**: the status bar (bottom of screen) and level-transition/demo
+screens came back corrupted and blinking. Root cause, found by reading
+`doom/st_stuff.c` and `doom/f_wipe.c`: `screens[0]` ping-ponging between
+two different physical buffers every tic is incompatible with parts of the
+engine that assume the framebuffer's *content* (not just its address)
+persists across multiple tics, not just within one:
+- `ST_Drawer()`'s incremental "diff" mode (`ST_diffDraw()` ->
+  `STlib_update*(..., refresh=false)`) skips repainting a status-bar widget
+  whose value hasn't changed since last tic, relying on last tic's pixels
+  still being visible. If `screens[0]` pointed at the *other* buffer last
+  tic, those pixels were never drawn into *this* buffer at all.
+- `f_wipe.c`'s level-transition melt effect is worse: `wipe_ScreenWipe()`
+  caches `wipe_scr = screens[0]` **once** at the start of a multi-tic (~30
+  tic) animation and keeps writing into that same captured pointer for the
+  whole animation, never re-reading `screens[0]`. Every tic after the
+  first writes into an increasingly stale, eventually-orphaned buffer.
+
+Unlike `R_InitBuffer()`'s `ylookup[]`/`columnofs[]` cache (a pointer cache,
+fixable by re-running the same init function after every swap), these are
+*content*-persistence assumptions -- there's no equivalent "just refresh
+it" fix; a ping-ponged buffer fundamentally cannot provide "what I drew N
+tics ago is still visible now" the way a single stable buffer does.
+
+**Phase 4.6.2 (revert)**: `screens[0]` is never reassigned again.
+`I_FinishUpdate()` goes back to the Phase 4.5 shape -- `memcpy` `screens[0]`
+into whichever of `g_screen_buf[0]`/`[1]` is free, hand the index to core1,
+same backpressure/FIFO handoff as before. The buffers themselves are
+unchanged (slot 0 SRAM, slot 1 PSRAM, from Phase 4.6.1) so core1's convert
+loop keeps the same partial SRAM benefit; what's lost is only the
+render-time benefit of `screens[0]` itself sometimes being SRAM (never
+directly measured, folded into the ~13-15fps number above) and the memcpy
+cost comes back (`core0-memcpy%`, reinstated in the stats line). ⏳ Not yet
+hardware-tested -- expect FPS to land somewhere between the ~10.5fps
+fully-PSRAM baseline and the ~15fps ping-pong number, and the status
+bar/transitions to render correctly again.
+
+**"Use" key (Space) not opening doors, investigated in parallel**: added
+temporary `#ifdef PICO` diagnostics at `G_BuildTiccmd` (`doom/g_game.c`,
+confirms `BT_USE` gets set), `P_UseLines` (`doom/p_map.c`, confirms
+gameplay logic is reached), and `PTR_UseTraverse` (confirms what
+`P_PathTraverse` finds in front of the player). Hardware log showed the
+full chain working correctly: `BT_USE` set every tic held, `P_UseLines`
+called exactly once per press (correct edge-triggered behavior via
+`player->usedown`, not once per tic), `PTR_UseTraverse` reached and
+reporting `special=0` -- i.e. it found a line in front of the player, but
+that line has no special (a plain wall, not a door/switch). **Not a bug**:
+the whole input->gameplay pipeline is confirmed correct end to end; the
+test just wasn't aimed at an actual use-triggered linedef at that moment.
+Diagnostics removed.
+
+### Phase 4.7 — CPU: renderer inner-loop tuning (2026-09-11, ⏳ not yet hardware-tested)
+
+Looked at RP2350-specific renderer optimizations while waiting for hardware
+access. Two ideas considered, verified by actually compiling and
+disassembling (`arm-none-eabi-objdump -d`) rather than assumed:
+
+- **Hardware interpolators (`SIO_INTERP0`/`INTERP1`)** for `R_DrawColumn`'s
+  DDA texture-mapping loop (`frac += fracstep; idx = (frac>>FRACBITS)&127`)
+  -- the standout idea from reading kilograham/rp2040-doom's writeup, and
+  the textbook use case for this peripheral. **Not pursued**: disassembly
+  showed GCC `-O3` already compiles `(frac>>FRACBITS)&127` to a single
+  `UBFX` (bitfield-extract) instruction -- there's no instruction count to
+  save, and trading an already-optimal ALU op for a peripheral round-trip
+  is as likely to be a wash or a slight loss as a win, with no hardware
+  available yet to actually measure it either way. `R_DrawSpan`'s Y-index
+  (`(yfrac>>10)&(63*64)`, pre-shifted so it can OR with the X-index without
+  a multiply) does *not* compile to a single instruction (needs a separate
+  `AND` after the shift, since the result isn't right-aligned) -- a
+  narrower, still-unconfirmed candidate, not implemented.
+- **Loop-invariant reloads** (implemented): disassembly of `R_DrawColumn`/
+  `R_DrawColumnLow`/`R_DrawTranslatedColumn`/`R_DrawSpan`/`R_DrawSpanLow`
+  (`doom/r_draw.c`) showed `dc_source`/`dc_colormap`/`dc_translation`/
+  `ds_source`/`ds_colormap`/`ds_xstep`/`ds_ystep` reloaded from memory on
+  *every* pixel despite never changing across any of these loops -- GCC
+  can't rule out that the `*dest` store aliases the global pointer
+  variables themselves without whole-program visibility (no LTO in this
+  build). Fixed by caching each into a local before the loop, `#ifdef
+  PICO` (behaviorally a no-op on any platform, gated for diff-auditability
+  consistency with the rest of this file, same as every other doom/
+  change this session) -- not a novel idea, id Software's own `#if 0`'d
+  "UNUSED, loop unrolled" reference versions of `R_DrawColumn`/`R_DrawSpan`
+  already do exactly this caching, just never enabled. Confirmed via
+  disassembly: zero reloads left inside any of the 5 loop bodies
+  (previously 2-4 per iteration depending on the function);
+  `R_DrawSpanLow` (2 pixels/source-lookup, blocky mode) had the worst case
+  since every reload was paid twice per source pixel. `R_DrawColumn`'s
+  loop itself went from 10 to 9 instructions/pixel; the bigger win is in
+  the multi-pointer functions (`R_DrawSpan`: 4 reloads removed/iteration).
 
 ## Phase 3 — Input
 

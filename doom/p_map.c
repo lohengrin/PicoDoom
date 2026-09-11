@@ -1095,7 +1095,7 @@ mobj_t*		usething;
 boolean	PTR_UseTraverse (intercept_t* in)
 {
     int		side;
-	
+
     if (!in->d.line->special)
     {
 	P_LineOpening (in->d.line);
@@ -1115,7 +1115,7 @@ boolean	PTR_UseTraverse (intercept_t* in)
 	side = 1;
     
     //	return false;		// don't use back side
-	
+
     P_UseSpecialLine (usething, in->d.line, side);
 
     // can't use for than one special line in a row
@@ -1136,7 +1136,7 @@ void P_UseLines (player_t*	player)
     fixed_t	y2;
 	
     usething = player->mo;
-		
+
     angle = player->mo->angle >> ANGLETOFINESHIFT;
 
     x1 = player->mo->x;

@@ -331,11 +331,11 @@ void G_BuildTiccmd (ticcmd_t* cmd)
 	|| joybuttons[joybfire]) 
 	cmd->buttons |= BT_ATTACK; 
  
-    if (gamekeydown[key_use] || joybuttons[joybuse] ) 
-    { 
+    if (gamekeydown[key_use] || joybuttons[joybuse] )
+    {
 	cmd->buttons |= BT_USE;
-	// clear double clicks if hit use button 
-	dclicks = 0;                   
+	// clear double clicks if hit use button
+	dclicks = 0;
     } 
 
     // chainsaw overrides 
