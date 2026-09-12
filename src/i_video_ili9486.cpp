@@ -35,10 +35,40 @@
 // transition screens. Not a one-off fix like R_InitBuffer(): unlike a
 // pointer *cache* that can be refreshed, these assume *content*
 // persists across frames, which a ping-ponged buffer fundamentally can't
-// guarantee. So: screens[0] is never touched here again, back to
-// memcpy'ing it into g_screen_buf[next] (one SRAM, one PSRAM, unchanged
-// from Phase 4.6.1 -- see that buffer's own doc comment) each frame and
-// handing the index to core1, same shape as the original Phase 4.5 design.
+// guarantee. So: screens[0] is never touched here again -- see g_screen_buf
+// below for what replaced the plain memcpy this fed into.
+//
+// Phase 5 (performance, first attempt) tried fusing that memcpy with core1's
+// palette conversion into one pass on core0, producing ready-to-DMA RGB565
+// output directly, plus collapsing core1's per-row DMA into one
+// dma_channel_configure() per frame. REVERTED at the time: FPS dropped from
+// 11.4 to ~7.5 on real hardware, because PSRAM was still capped at a
+// conservative 30MHz then -- fusing forced both blit buffers to be
+// always-PSRAM and doubled the per-pixel write width (byte -> uint16_t), and
+// at 30MHz that write cost far outweighed removing the double-traversal.
+//
+// Phase 6 (performance): retrying Phase 5's exact fusion, now that PSRAM
+// runs at 100MHz (PicoDoom.cpp's clk_sys/clk_peri overclock + updated
+// psram_configs.h -- over 3x Phase 5's 30MHz) and the SPI pixel clock is
+// 33.33MHz (up from 25MHz). Motivation: hardware measurement after the
+// clock-tuning pass alone (11.4 -> ~18.7fps) still showed core1-dma
+// dominating (~70% of the frame) while core0 sat idle waiting ~45-55% of
+// its own frame time -- the two cores' work isn't balanced, and neither
+// __not_in_flash_func() on the hot renderer loops (doom/r_draw.c) nor
+// batching core1's DMA calls moved the needle, so the remaining lever is
+// shifting work from core1 (the bottleneck) to core0 (which has slack) by
+// moving conversion back onto core0, fused with the copy, same as Phase 5 --
+// but this time with PSRAM fast enough that the fused pass might cost less
+// than Phase 4.6.2's separate memcpy+convert did *combined*, not more.
+// core1 becomes pure DMA: pop an already-converted buffer, one
+// start_pixels_dma() call for the whole frame (non-blocking, polled from
+// the caller's loop so tuh_task() still runs every iteration -- see
+// i_video_core1.hpp), no per-row chunking needed at all since there's no
+// conversion left to interleave with USB servicing.
+// NOT YET hardware-validated. If this regresses like Phase 5 did, the fix
+// is the same: revert to Phase 4.6.2's split memcpy (core0) + per-row
+// convert+DMA (core1), which is known-good at these clock speeds too
+// (measured ~18.7fps).
 #include "pico_toolset/ili9486.h"
 #include "pico_toolset/ili9486_configs.h"
 #include "pico_toolset/psram.h"
@@ -74,53 +104,23 @@ constexpr int kDstWidth = SCREENWIDTH;   // 320, 1:1 -- see file header
 constexpr int kDstHeight = SCREENHEIGHT; // 200
 constexpr int kOffsetX = (pico_toolset::Ili9486::kWidth - kDstWidth) / 2;   // 80
 constexpr int kOffsetY = (pico_toolset::Ili9486::kHeight - kDstHeight) / 2; // 60
-
-// core1's per-call blit granularity (see i_video_core1_step() below):
-// convert+DMA-transfer this many rows per call. TRIED 8 (on the theory that
-// 200 dma_channel_configure() + 200 tuh_task() calls/frame were the
-// overhead above the ~41ms SPI-bound theoretical minimum) -- measured WORSE
-// (9.1-9.6fps vs. 10.5fps at chunk=1) AND hung after ~20-25s (core1-blit%
-// climbing toward 100% right before it did). Root cause never confirmed,
-// but the strong suspect is Pico-PIO-USB itself: batching stretched the gap
-// between tuh_task() calls from ~one row's DMA wait (~200us) to one whole
-// chunk's (~1.6ms at 8 rows -- convert-then-transfer, so the *whole* chunk's
-// CPU+DMA time elapses between tuh_task() calls, not just the DMA part),
-// which plausibly starves whatever software-timed bus servicing (SOF
-// generation, retry windows) Pico-PIO-USB needs on a tighter cadence than
-// that -- unconfirmed, but not worth re-risking a hang to find out. Back to
-// 1 (known-stable) until g_core1_convert_us_accum/g_core1_dma_us_accum
-// below (added at the same time as this revert) show where the real ~95ms/
-// frame is actually going, instead of guessing again.
-constexpr int kRowsPerChunk = 1;
-
-// Nearest-neighbor source index per destination pixel, precomputed once
-// (I_InitGraphics) so the per-row conversion is a plain table lookup
-// instead of a per-pixel multiply+divide. Read by core1 (i_video_core1_step)
-// -- written once at init, before core1 ever has a frame to consume, so no
-// synchronization needed.
-int g_xsrc[kDstWidth];
-int g_ysrc[kDstHeight];
+constexpr int kFramePixels = kDstWidth * kDstHeight;
 
 // --- core0 -> core1 blit handoff (ping-pong, see file header) ---
-// I_FinishUpdate() memcpy's screens[0] into whichever of these is free;
-// core1 converts+feeds from its own copy, then flags that slot free again.
-// Slot 0 is a plain SRAM static array; slot 1 is psram_malloc'd in
-// I_InitGraphics(). Deliberately asymmetric, not both-SRAM: Phase 4.6.1
-// found that putting 128000 bytes of buffers in SRAM shrank the newlib
-// heap budget enough (~134KB -> ~74KB) that W_Init() loading this WAD's
-// directory table (a full commercial IWAD, ~2900+ lumps) hit the SDK's
-// malloc-panics-past-__StackLimit guard ("*** PANIC *** Out of memory")
-// before the game even reached the title screen. One SRAM slot gives back
-// ~62.5KB of the ~64KB the const-ified trig tables freed (see
-// doc/PLAN.md), landing the heap budget roughly back at what already
-// proved sufficient to load this exact WAD -- and still gets core1's
-// convert loop reading SRAM every other frame instead of never.
-byte g_screen_buf0[SCREENWIDTH * SCREENHEIGHT];
-byte* g_screen_buf[2] = {g_screen_buf0, nullptr};
-// true = free for core0 to memcpy screens[0] into. Flip conventions match
-// PicoUsbKeyboard.cpp's g_active_buf: plain volatile bool, one writer per
-// flag direction (core0 only ever clears its target index, core1 only ever
-// sets the index it just finished), safe on this platform without a lock.
+// I_FinishUpdate() converts screens[0] (palette-indexed) into whichever of
+// these is free, writing ready-to-DMA RGB565-wire pixels directly (Phase 6);
+// core1 just DMAs one straight from PSRAM to the panel, then flags that slot
+// free again. Both slots PSRAM-backed: a single 128000-byte (kFramePixels *
+// sizeof(uint16_t)) slot is already most of Phase 4.6.1's proven SRAM-OOM
+// threshold on its own, so two of them (256000B total) stay off the newlib
+// heap entirely, same reasoning as that phase's doc history -- only the
+// clock got faster, not the SRAM budget.
+uint16_t* g_screen_buf[2] = {nullptr, nullptr};
+// true = free for core0 to write screens[0]'s converted pixels into. Flip
+// conventions match PicoUsbKeyboard.cpp's g_active_buf: plain volatile
+// bool, one writer per flag direction (core0 only ever clears its target
+// index, core1 only ever sets the index it just finished), safe on this
+// platform without a lock.
 volatile bool g_blit_buf_free[2] = {true, true};
 
 // --- Stats line (SRAM/PSRAM usage, FPS, timing breakdown) ---
@@ -131,25 +131,23 @@ volatile bool g_blit_buf_free[2] = {true, true};
 // zone heap + screen buffer (see doom/i_system.c, i_video_ili9486.cpp).
 // "wait%" is core0's own I_FinishUpdate() time spent blocked on backpressure
 // (waiting for core1 to free a buffer) -- 0% means core0 is the bottleneck
-// (game logic/render), high% means core1's blit is. "memcpy%" is core0's
-// screens[0]->g_screen_buf copy, also relative to its own frame time (back
-// since Phase 4.6.2 reverted the screens[0]-ping-pong that had removed it
-// -- see file header). "convert%"/"dma%" split core1's own per-frame time
-// (relative to the stats window) between the palette->RGB565 LUT loop
-// (SRAM every other frame, PSRAM the frames in between -- see
-// g_screen_buf's doc comment) and the actual write_pixels() SPI feed.
+// (game logic/render), high% means core1's DMA is. "convert%" is core0's
+// fused screens[0]->g_screen_buf copy+palette-to-RGB565 pass (Phase 6),
+// also relative to its own frame time. "dma%" is core1's per-frame time
+// (relative to the stats window) spent in the
+// start_pixels_dma()/pixels_busy()-poll/finish_pixels_dma() sequence
+// feeding the whole converted frame to the panel.
 uint64_t g_last_frame_start_us = 0;
 uint64_t g_stats_window_start_us = 0;
 uint32_t g_frames_in_window = 0;
 uint64_t g_wait_us_in_window = 0;
-uint64_t g_memcpy_us_in_window = 0;
+uint64_t g_convert_us_in_window = 0;
 uint64_t g_frame_us_in_window = 0;
 
-// Written by core1 (i_video_core1_step, after each row/chunk), read and
-// reset by core0's report_stats_if_due() -- plain accumulators like
-// PicoUsbKeyboard's cross-core fields; a torn read would only skew one 10s
-// diagnostic line, not correctness.
-volatile uint64_t g_core1_convert_us_accum = 0;
+// Written by core1 (i_video_core1_step), read and reset by core0's
+// report_stats_if_due() -- plain accumulator like PicoUsbKeyboard's
+// cross-core fields; a torn read would only skew one 10s diagnostic line,
+// not correctness.
 volatile uint64_t g_core1_dma_us_accum = 0;
 
 void report_stats_if_due(uint64_t now_us) {
@@ -166,11 +164,8 @@ void report_stats_if_due(uint64_t now_us) {
     float wait_pct = g_frame_us_in_window
         ? 100.0f * static_cast<float>(g_wait_us_in_window) / static_cast<float>(g_frame_us_in_window)
         : 0.0f;
-    float memcpy_pct = g_frame_us_in_window
-        ? 100.0f * static_cast<float>(g_memcpy_us_in_window) / static_cast<float>(g_frame_us_in_window)
-        : 0.0f;
-    float convert_pct = elapsed_us
-        ? 100.0f * static_cast<float>(g_core1_convert_us_accum) / static_cast<float>(elapsed_us)
+    float convert_pct = g_frame_us_in_window
+        ? 100.0f * static_cast<float>(g_convert_us_in_window) / static_cast<float>(g_frame_us_in_window)
         : 0.0f;
     float dma_pct = elapsed_us
         ? 100.0f * static_cast<float>(g_core1_dma_us_accum) / static_cast<float>(elapsed_us)
@@ -183,17 +178,16 @@ void report_stats_if_due(uint64_t now_us) {
     size_t psram_total = pico_toolset::psram_status().size_bytes;
 
     printf("PicoDoom: SRAM %u/%uKB  PSRAM %u/%uKB  FPS %.1f  "
-           "core0-wait %.0f%%  core0-memcpy %.0f%%  core1-convert %.0f%%  core1-dma %.0f%%\n",
+           "core0-wait %.0f%%  core0-convert %.0f%%  core1-dma %.0f%%\n",
            static_cast<unsigned>(sram_used / 1024), static_cast<unsigned>(sram_total / 1024),
            static_cast<unsigned>(psram_used / 1024), static_cast<unsigned>(psram_total / 1024),
-           fps, wait_pct, memcpy_pct, convert_pct, dma_pct);
+           fps, wait_pct, convert_pct, dma_pct);
 
     g_stats_window_start_us = now_us;
     g_frames_in_window = 0;
     g_wait_us_in_window = 0;
-    g_memcpy_us_in_window = 0;
+    g_convert_us_in_window = 0;
     g_frame_us_in_window = 0;
-    g_core1_convert_us_accum = 0;
     g_core1_dma_us_accum = 0;
 }
 } // namespace
@@ -204,28 +198,23 @@ void report_stats_if_due(uint64_t now_us) {
 extern "C" {
 
 void I_InitGraphics(void) {
-    for (int x = 0; x < kDstWidth; ++x)
-        g_xsrc[x] = x * SCREENWIDTH / kDstWidth;
-    for (int y = 0; y < kDstHeight; ++y)
-        g_ysrc[y] = y * SCREENHEIGHT / kDstHeight;
-
     // core1 is already running PicoUsbKeyboard's loop by this point (started
     // from src/PicoDoom.cpp before D_DoomMain()) and will start calling
     // i_video_core1_step() immediately -- but g_blit_buf_free starts all-true
     // and the inter-core FIFO starts empty, so it just no-ops until
-    // I_FinishUpdate() below ever pushes an index. g_screen_buf[0] is a
-    // plain static array (see its doc comment); g_screen_buf[1] is
-    // PSRAM-backed, allocated once here, same pattern (and failure handling)
-    // as the pre-Phase-4.6 blit buffers.
-    g_screen_buf[1] = static_cast<byte*>(pico_toolset::psram_malloc(SCREENWIDTH * SCREENHEIGHT));
-    if (!g_screen_buf[1])
-        // I_Error's signature predates `const` (1993 C) -- cast, not a
-        // real mutation.
-        I_Error(const_cast<char*>("I_InitGraphics: failed to allocate blit buffer"));
-    // Not load-bearing (I_FinishUpdate() always memcpy's into a slot before
-    // it's ever handed to core1), just avoids a stray uninitialized-PSRAM
-    // read if that ever stops being true.
-    memset(g_screen_buf[1], 0, SCREENWIDTH * SCREENHEIGHT);
+    // I_FinishUpdate() below ever pushes an index. Both slots PSRAM-backed
+    // (see g_screen_buf's doc comment).
+    for (uint16_t*& buf : g_screen_buf) {
+        buf = static_cast<uint16_t*>(pico_toolset::psram_malloc(kFramePixels * sizeof(uint16_t)));
+        if (!buf)
+            // I_Error's signature predates `const` (1993 C) -- cast, not a
+            // real mutation.
+            I_Error(const_cast<char*>("I_InitGraphics: failed to allocate blit buffer"));
+        // Not load-bearing (I_FinishUpdate() always fills a slot before it's
+        // ever handed to core1), just avoids a stray uninitialized-PSRAM
+        // read if that ever stops being true.
+        memset(buf, 0, kFramePixels * sizeof(uint16_t));
+    }
 
     g_display.init(pico_toolset::configs::ili9486::kWaveshareRp2350PiZero);
     // Black out the whole panel once, independent of any palette/game state
@@ -271,21 +260,27 @@ void I_FinishUpdate(void) {
         g_frame_us_in_window += frame_start_us - g_last_frame_start_us;
     g_last_frame_start_us = frame_start_us;
 
-    // Backpressure: only blocks if core1 hasn't finished blitting this same
+    // Backpressure: only blocks if core1 hasn't finished DMA'ing this same
     // buffer from two frames ago yet, i.e. if core1's SPI feed is the
     // bottleneck rather than core0's game logic/render -- see g_wait_us's
     // doc comment above.
     uint64_t wait_start_us = frame_start_us;
     while (!g_blit_buf_free[next_idx])
         tight_loop_contents();
-    uint64_t memcpy_start_us = time_us_64();
-    g_wait_us_in_window += memcpy_start_us - wait_start_us;
+    uint64_t convert_start_us = time_us_64();
+    g_wait_us_in_window += convert_start_us - wait_start_us;
 
     // screens[0] itself is never touched here (see file header) -- just
-    // copied out. core1 reads its own copy from here on.
-    memcpy(g_screen_buf[next_idx], screens[0], SCREENWIDTH * SCREENHEIGHT);
+    // read out. Fused copy+palette-to-RGB565 convert (Phase 6): one pass
+    // over the frame instead of a separate memcpy (here) and LUT loop
+    // (core1's, pre-Phase-6), each of which used to make their own full
+    // PSRAM pass. core1 reads its own ready-to-DMA copy from here on.
+    const byte* src = screens[0];
+    uint16_t* dst = g_screen_buf[next_idx];
+    for (int i = 0; i < kFramePixels; ++i)
+        dst[i] = g_rgb565_wire_lut[src[i]];
     uint64_t now_us = time_us_64();
-    g_memcpy_us_in_window += now_us - memcpy_start_us;
+    g_convert_us_in_window += now_us - convert_start_us;
 
     g_blit_buf_free[next_idx] = false;
     multicore_fifo_push_blocking(static_cast<uint32_t>(next_idx));
@@ -325,17 +320,19 @@ void I_StartFrame(void) {}
 } // extern "C"
 
 namespace {
-// core1-side blit state machine, stepped one chunk of kRowsPerChunk rows
-// (or one FIFO check) at a time by i_video_core1_step() -- see
-// i_video_core1.hpp for why this can't just be "pop a frame, blit it all in
-// one call": core1's caller (PicoUsbKeyboard::core1_entry()) needs to get
-// back to tuh_task() between chunks, not just between whole frames, or
-// Pico-PIO-USB's software-timed bus servicing starves for the ~41ms a full
-// frame's SPI feed takes.
-enum class BlitState { Idle, Blitting };
+// core1-side blit state machine (Phase 6: pure DMA, no conversion left on
+// this core -- see file header). Idle -> Transferring (poll until the
+// non-blocking DMA finishes) -> Idle each frame. Stepped once per call by
+// i_video_core1_step() -- see i_video_core1.hpp for why this can't just be
+// "pop a frame, DMA it and block until done": core1's caller
+// (PicoUsbKeyboard::core1_entry()) needs to get back to tuh_task() every
+// iteration, not just between whole frames, or Pico-PIO-USB's
+// software-timed bus servicing starves for the ~31ms a full frame's SPI
+// feed takes at 33.33MHz.
+enum class BlitState { Idle, Transferring };
 BlitState g_blit_state = BlitState::Idle;
 int g_blit_idx = 0;
-int g_blit_row = 0;
+uint64_t g_dma_start_us = 0;
 } // namespace
 
 void i_video_core1_step() {
@@ -343,45 +340,25 @@ void i_video_core1_step() {
         if (!multicore_fifo_rvalid())
             return;
         g_blit_idx = static_cast<int>(multicore_fifo_pop_blocking());
-        g_blit_row = 0;
         g_display.set_window(kOffsetX, kOffsetY,
                               kOffsetX + kDstWidth - 1, kOffsetY + kDstHeight - 1);
-        g_blit_state = BlitState::Blitting;
+        g_dma_start_us = time_us_64();
+        g_display.start_pixels_dma(std::span<const uint16_t>(g_screen_buf[g_blit_idx], kFramePixels));
+        g_blit_state = BlitState::Transferring;
         return;
     }
 
-    // Blitting: kRowsPerChunk rows converted, then ONE DMA transfer for the
-    // whole chunk -- see kRowsPerChunk's doc comment above. chunk_buf is
-    // core1-only (core0 no longer touches g_display or does any pixel
-    // conversion), so a plain static local is fine -- no cross-core sharing
-    // to worry about. Convert and DMA timed separately (not just bracketing
-    // the whole call) so the stats line can show which one actually
-    // dominates instead of a single opaque "blit" number -- see
-    // g_core1_convert_us_accum/g_core1_dma_us_accum's doc comment above.
-    static uint16_t chunk_buf[kRowsPerChunk * kDstWidth];
-    int rows_this_chunk = kDstHeight - g_blit_row;
-    if (rows_this_chunk > kRowsPerChunk)
-        rows_this_chunk = kRowsPerChunk;
+    // Transferring: don't block here -- return immediately if the DMA is
+    // still running so the caller's loop gets back to tuh_task() before
+    // checking again next iteration.
+    if (g_display.pixels_busy())
+        return;
 
-    uint64_t convert_start_us = time_us_64();
-    for (int r = 0; r < rows_this_chunk; ++r) {
-        const byte* srcrow = g_screen_buf[g_blit_idx] + g_ysrc[g_blit_row + r] * SCREENWIDTH;
-        uint16_t* dstrow = chunk_buf + r * kDstWidth;
-        for (int x = 0; x < kDstWidth; ++x)
-            dstrow[x] = g_rgb565_wire_lut[srcrow[g_xsrc[x]]];
-    }
-    uint64_t dma_start_us = time_us_64();
-    g_core1_convert_us_accum += dma_start_us - convert_start_us;
-
-    g_display.write_pixels(std::span<const uint16_t>(chunk_buf, static_cast<size_t>(rows_this_chunk) * kDstWidth));
-    g_core1_dma_us_accum += time_us_64() - dma_start_us;
-    g_blit_row += rows_this_chunk;
-
-    if (g_blit_row >= kDstHeight) {
-        g_display.end_write();
-        // Release last: only after set_window/every row/end_write are all
-        // done does core0 get to point screens[0] back at this buffer.
-        g_blit_buf_free[g_blit_idx] = true;
-        g_blit_state = BlitState::Idle;
-    }
+    g_display.finish_pixels_dma();
+    g_core1_dma_us_accum += time_us_64() - g_dma_start_us;
+    g_display.end_write();
+    // Release last: only after set_window/DMA/finish/end_write are all done
+    // does core0 get to write this buffer's next frame.
+    g_blit_buf_free[g_blit_idx] = true;
+    g_blit_state = BlitState::Idle;
 }
