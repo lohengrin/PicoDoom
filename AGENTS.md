@@ -50,12 +50,17 @@ top-level `PICO_TOOLSET_BUILD_<NAME>` options set in this project's `CMakeLists.
 Phase 1 (done) moved PSRAM, the SD card mount + POSIX/stdio syscalls, the hard-fault
 handler, and the shared board header onto it — see `pico_toolset_psram`/
 `pico_toolset_sdcard`/`pico_toolset_fault_handler` and their headers under
-`third_party/pico-toolset/components/`/`libs/`. **Phase 2 (not yet done)** will move
-`src/Ili9486Display.*` and `src/PicoUsbKeyboard.*`/`src/PicoUsbMouse.*` onto
-`pico_toolset_ili9486`/`pico_toolset_usb_hid` too — deferred because those adapters
-(`src/i_video_ili9486.cpp`'s chunked core1 blit state machine, `src/i_input_usbhid.cpp`'s
-core1/`tuh_task()` interleaving) encode tuned, hardware-verified timing behavior that
-needs a real flash-and-test pass, not just a clean compile, before landing. When
+`third_party/pico-toolset/components/`/`libs/`. Phase 2 (done) moved the ILI9486
+display and USB-HID keyboard/mouse input onto `pico_toolset_ili9486`/
+`pico_toolset_usb_hid` too — `src/i_video_ili9486.cpp` now drives `pico_toolset::Ili9486`
+directly (no more `src/Ili9486Display.*`), and `src/i_input_usbhid.cpp` owns core1 itself
+(launching it, then calling `pico_toolset::UsbHidHost::init()` with
+`configs::usb_hid::kWaveshareRp2350PiZeroLcdManualCore1`, `run_on_core1=false`) so that
+same core1 loop can interleave `UsbHidHost::task()` with `i_video_core1_step()` — no more
+`src/PicoUsbKeyboard.*`/`src/PicoUsbMouse.*`. That preset, plus `UsbHidHost`'s
+`consume_mouse_delta()` (raw relative movement for mouselook, alongside the existing
+clamped-cursor `mouse_state()`) and `MouseState::middle_button`, were contributed to
+Pico-Toolset as part of this move — see that repo's AGENTS.md "Source lineage". When
 extending or fixing a driver PicoDoom uses via the submodule, prefer fixing/extending
 it in Pico-Toolset (then bumping the submodule pin) over patching a local fork — that's
 the whole point of sharing it with TOM6809.
@@ -149,22 +154,23 @@ guarded (`channels` is NULL under `#ifdef PICO`).
   SDK inter-core FIFO; only blocks if core1 hasn't freed the target buffer yet
   (i.e. only if core1's SPI feed, not core0's game logic/render, is the
   bottleneck). `src/i_video_core1.hpp`'s `i_video_core1_step()` does the actual
-  work — LUT-convert one row + DMA-feed it to `Ili9486Display`, one row per call
-  — from core1's loop (see below), centered 1:1 (no scaling) in an 80/60px
-  black border. Stepped one row at a time (not one blocking per-frame call) so
-  it interleaves with `tuh_task()` rather than starving Pico-PIO-USB's
-  software-timed bus servicing for the ~41ms a full frame's SPI feed takes at
-  25 MHz.
+  work — LUT-convert one row + DMA-feed it to `pico_toolset::Ili9486`, one row
+  per call — from core1's loop (see below), centered 1:1 (no scaling) in an
+  80/60px black border. Stepped one row at a time (not one blocking per-frame
+  call) so it interleaves with `UsbHidHost::task()` rather than starving
+  Pico-PIO-USB's software-timed bus servicing for the ~41ms a full frame's
+  SPI feed takes at 25 MHz.
 - `r_draw.c`'s `R_InitBuffer()` caches per-row pointers *into* `screens[0]`
   (`ylookup[i] = screens[0] + ...`), refreshed only on view-size changes (the
   menu's screen-size +/- keys) — moot now that `screens[0]` never moves, but
   the reason this file must never start reassigning `screens[0]` again without
   re-reading the Phase 4.6.2 history first.
-- `src/Ili9486Display.{hpp,cpp}` — low-level SPI1 driver, ported verbatim from the
-  validated TOM6809 project (shift-register wire protocol, panel init sequence);
-  needs C++20 (`std::span`), hence `CMAKE_CXX_STANDARD 20`. Only ever touched from
-  core0 during the one-time `I_InitGraphics()`/`fill_solid()` bring-up call and from
-  core1 thereafter (`i_video_core1_step()`) — never concurrently.
+- `pico_toolset::Ili9486` (Pico-Toolset submodule) — low-level SPI1 driver, originally
+  ported verbatim from the validated TOM6809 project (shift-register wire protocol,
+  panel init sequence) and since moved to Pico-Toolset (Phase 2); needs C++20
+  (`std::span`), hence `CMAKE_CXX_STANDARD 20`. Only ever touched from core0 during the
+  one-time `I_InitGraphics()`/`fill_solid()` bring-up call and from core1 thereafter
+  (`i_video_core1_step()`) — never concurrently.
 - Stats line (10s interval): `core0-wait%` (backpressure — high means core1 is the
   bottleneck), `core0-memcpy%` (the `screens[0]`->`g_screen_buf` copy, back since
   Phase 4.6.2), `core1-convert%` (the palette→RGB565 LUT loop — reads SRAM every
@@ -222,7 +228,7 @@ LCD driver.
   `screens[0]`; the automap overlays the same framebuffer. Full 320×200 index pipeline.
 - `doomstat`/`gamestate` etc. are plain globals; a native `pause` and the console output
   can be added without touching the engine.
-- C11 (C standard), C++20 for drivers (needed for `std::span` in Ili9486Display);
+- C11 (C standard), C++20 for drivers (needed for `std::span` in `pico_toolset::Ili9486`);
   engine is C → easy `extern "C"` binding, but the *definitions* need `extern "C"`
   too when they live in a `.cpp` file (see src/i_video_ili9486.cpp), not just the
   included header's declarations, or the linker gets C++-mangled symbol names.
@@ -251,20 +257,19 @@ CMakeLists.txt        # PicoDoom target; DOOMSRC list; Pico-Toolset add_subdirec
 src/PicoDoom.cpp      # bare-metal main(): PSRAM init → sd_init() → D_DoomMain()
 src/sd_stdio.cpp       # uSD mount (pico_toolset::SdCard) + _gettimeofday/usleep
                         # (POSIX stdio syscalls themselves now live in pico_toolset_sdcard)
-src/Ili9486Display.cpp/.hpp  # low-level ILI9486/SPI1 driver, ported from TOM6809 (Phase 2
-                              # follow-up: move onto pico_toolset_ili9486, see "Pico-Toolset" above)
-src/i_video_ili9486.cpp      # DOOM i_video.h impl: screens[0] ping-ponged (SRAM) -> core1 -> LUT -> LCD
+src/i_video_ili9486.cpp      # DOOM i_video.h impl: screens[0] ping-ponged (SRAM) -> core1 -> LUT ->
+                              # pico_toolset::Ili9486 (LCD driver itself now in Pico-Toolset, Phase 2)
 src/i_video_core1.hpp        # i_video_core1_step(): one row of pending blit work, called from core1
-src/PicoUsbKeyboard.cpp/.hpp # USB-PIO HID keyboard host on core1 (Phase 3; Phase 2
-                              # follow-up: move onto pico_toolset_usb_hid); owns the
-                              # shared tuh_hid_*_cb callbacks (TinyUSB allows only one each);
-                              # core1_entry()'s loop also drives i_video_core1_step() (Phase 4.5)
-src/PicoUsbMouse.cpp/.hpp    # USB HID mouse (Phase 3), dispatched from PicoUsbKeyboard's callbacks
-src/i_input_usbhid.cpp       # I_StartTic: HID reports -> DOOM event_t/D_PostEvent
-src/tusb_config.h            # TinyUSB config: device (stdio_usb) + host (keyboard)
-third_party/pico-toolset/    # git submodule: shared PSRAM/SD-card/fault-handler/board-header
-                              # drivers (see "Pico-Toolset" above) -- pico_toolset_psram,
-                              # pico_toolset_sdcard, pico_toolset_fault_handler, boards/
+src/i_input_usbhid.cpp       # pico_toolset::UsbHidHost keyboard/mouse host; owns core1 (launches it,
+                              # then init()s the host stack from inside core1_entry() with
+                              # run_on_core1=false, since Pico-PIO-USB's IRQ binds to whichever core
+                              # calls tuh_init() -- see file header); I_StartTic: HID state -> DOOM
+                              # event_t/D_PostEvent; core1_entry()'s loop also drives
+                              # i_video_core1_step() (Phase 4.5, kept from the old PicoUsbKeyboard.cpp)
+third_party/pico-toolset/    # git submodule: shared PSRAM/SD-card/fault-handler/board-header/
+                              # ILI9486/USB-HID drivers (see "Pico-Toolset" above) -- pico_toolset_psram,
+                              # pico_toolset_sdcard, pico_toolset_fault_handler, pico_toolset_ili9486,
+                              # pico_toolset_usb_hid, boards/
 doom/                 # upstream DOOM 1.10 + null i_* stubs + PICO guards
 doom/i_sound_null.c   # sound stub
 doom/i_net_null.c     # net stub

@@ -13,8 +13,8 @@ extern "C" {
 #include "pico_toolset/psram.h"
 #include "pico_toolset/psram_configs.h"
 #include "pico_toolset/fault_handler.h"
-#include "PicoUsbKeyboard.hpp"
 extern "C" bool sd_init(void);
+extern "C" void usb_hid_core1_init(void); // src/i_input_usbhid.cpp
 
 static void fatal(const char* msg)
 {
@@ -56,12 +56,12 @@ int main(void)
         fatal("uSD mount failed (is a FAT32 card with the WAD inserted?)");
     printf("PicoDoom: uSD mounted\n");
 
-    // Phase 3: USB-PIO HID keyboard host (GPIO28/29), on its own core1 --
-    // started here, before D_DoomMain(), so it has the whole WAD-load/
-    // engine-init stretch to enumerate a keyboard before the game loop
-    // starts polling it (see src/PicoUsbKeyboard.cpp).
+    // Phase 3: USB-PIO HID keyboard/mouse host (GPIO28/29), on its own
+    // core1 -- started here, before D_DoomMain(), so it has the whole
+    // WAD-load/engine-init stretch to enumerate a keyboard before the game
+    // loop starts polling it (see src/i_input_usbhid.cpp).
     printf("PicoDoom: USB-PIO keyboard host init (core1)...\n");
-    PicoUsbKeyboard::init();
+    usb_hid_core1_init();
 
     // Engine globals (m_argv.c); no command-line parameters for now --
     // IdentifyVersion finds the WAD (doom1.wad/doom.wad/... ) on the SD root.

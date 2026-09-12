@@ -33,27 +33,21 @@ include(pico_sdk_import.cmake)
 
 project(PicoDoom C CXX ASM)
 set(CMAKE_C_STANDARD 11)
-# 20, not 17: src/Ili9486Display.hpp (ported verbatim from TOM6809's
-# validated driver for this exact panel) uses std::span, C++20-only.
+# 20, not 17: Pico-Toolset's pico_toolset::Ili9486 (src/i_video_ili9486.cpp)
+# uses std::span, C++20-only.
 set(CMAKE_CXX_STANDARD 20)
 
 # initialize the Raspberry Pi Pico SDK
 pico_sdk_init()
 
-# Pico-Toolset (submodule, third_party/pico-toolset) provides pico_fatfs
-# (uSD/FatFs, with PICO_PIO_USE_GPIO_BASE=1 already set -- this board's uSD
-# MISO pin, GPIO40, is >31 and pico_fatfs's generated PIO driver would
-# otherwise silently alias it to GPIO8) and Pico-PIO-USB/tinyusb_host (this
-# board's PIO-emulated USB *host* controller for keyboard/mouse input,
-# PICO_DEFAULT_PIO_USB_DP_PIN/GPIO28-29 -- RP2350's own USB peripheral is
-# native-device-only and already committed to stdio_usb's serial console).
-# Phase 1: PSRAM, SD card (+ its opt-in POSIX/stdio syscall shim) and the
-# fault handler are consumed via their pico_toolset_* targets below. ILI9486/
-# USB_HID stay ON here because src/Ili9486Display.* and
-# src/PicoUsbKeyboard.*/PicoUsbMouse.* still use their own local copies
-# pending the Phase 2 follow-up, and this project still needs the
-# pico_fatfs/pico_pio_usb/tinyusb_host targets they'd otherwise have set up
-# via the FetchContent blocks this replaces.
+# Pico-Toolset (submodule, third_party/pico-toolset) provides every
+# non-engine driver this project uses: pico_toolset_ili9486 (LCD),
+# pico_toolset_usb_hid (PIO-USB keyboard/mouse host, PICO_DEFAULT_PIO_USB_DP_PIN/
+# GPIO28-29 -- RP2350's own USB peripheral is native-device-only and already
+# committed to stdio_usb's serial console), pico_toolset_sdcard (uSD/FatFs +
+# its opt-in POSIX/stdio syscall shim), pico_toolset_psram, and
+# pico_toolset_fault_handler. SSD1306/XPT2046/I2S_AUDIO/RESET_BUTTONS/
+# DVI_HDMI/SCREEN are unused by this project -- off to skip building them.
 set(PICO_TOOLSET_BUILD_SSD1306 OFF CACHE BOOL "" FORCE)
 set(PICO_TOOLSET_BUILD_XPT2046 OFF CACHE BOOL "" FORCE)
 set(PICO_TOOLSET_BUILD_I2S_AUDIO OFF CACHE BOOL "" FORCE)
@@ -177,23 +171,20 @@ endforeach()
 add_executable(PicoDoom
 src/PicoDoom.cpp
 src/sd_stdio.cpp
-src/Ili9486Display.cpp
 src/i_video_ili9486.cpp
-src/PicoUsbKeyboard.cpp
-src/PicoUsbMouse.cpp
 src/i_input_usbhid.cpp
 ${DOOMSRC}
 )
 
 # pico_toolset_sdcard (uSD/FatFs + POSIX stdio shim), pico_toolset_psram
 # (QMI PSRAM), pico_toolset_fault_handler (hard-fault -> next-boot report),
-# hardware_spi + hardware_dma (ILI9486 LCD over SPI1, DMA-fed pixel pushes,
-# still local -- see src/Ili9486Display.*), pico_pio_usb + tinyusb_host +
-# pico_multicore (Phase 3 USB-PIO keyboard host on core1, still local -- see
-# src/PicoUsbKeyboard.cpp; hcd_pio_usb.c comes in as an INTERFACE source of
-# pico_pio_usb, set up by third_party/pico-toolset/cmake/pico_pio_usb.cmake),
-# hardware_watchdog (doom/i_system.c's I_Quit -> watchdog_reboot()), on top
-# of pico_stdlib.
+# pico_toolset_ili9486 (LCD over SPI1, DMA-fed pixel pushes -- brings in
+# hardware_spi/hardware_dma), pico_toolset_usb_hid (PIO-USB keyboard/mouse
+# host -- brings in pico_pio_usb/tinyusb_host, hcd_pio_usb.c as an INTERFACE
+# source of pico_pio_usb, and the PICO_STDIO_USB_* compile definitions
+# below), pico_multicore (src/i_input_usbhid.cpp launches core1 itself --
+# see that file for why), hardware_watchdog (doom/i_system.c's I_Quit ->
+# watchdog_reboot()), on top of pico_stdlib.
 target_link_libraries(PicoDoom
     pico_stdlib
     # -u,_stat: pico_toolset_sdcard's sdcard_stdio.cpp.o defines
@@ -215,10 +206,8 @@ target_link_libraries(PicoDoom
     pico_toolset_sdcard
     pico_toolset_psram
     pico_toolset_fault_handler
-    hardware_spi
-    hardware_dma
-    pico_pio_usb
-    tinyusb_host
+    pico_toolset_ili9486
+    pico_toolset_usb_hid
     pico_multicore
     hardware_watchdog
 )
@@ -235,52 +224,17 @@ target_compile_definitions(PicoDoom PRIVATE PICO)
 # consumer (this board's uSD MISO pin, GPIO40, is >31 and pico_fatfs's
 # generated PIO driver would otherwise silently alias it to GPIO8).
 
-# Linking tinyusb_host (above, for the USB-PIO keyboard) flips FOUR separate
+# Linking tinyusb_host (via pico_toolset_usb_hid, above) flips FOUR separate
 # SDK defaults that only exist to detect "is this app using TinyUSB itself,
-# beyond stdio_usb". Every one of these is `!LIB_TINYUSB_HOST &&
-# !LIB_TINYUSB_DEVICE`-gated, and LIB_TINYUSB_HOST becomes true the moment
-# tinyusb_host is linked -- with any of these left at their new (off)
-# default, the native USB CDC console (this whole project's primary
-# debugging channel) goes silently dead, or the build fails to link.
-# Verified the hard way on TOM6809 (same board, same pico_pio_usb +
-# tinyusb_host combination) -- ported its exact fix rather than
-# rediscovering each one:
-#  - USE_DEFAULT_DESCRIPTORS: stdio_usb_descriptors.c stops being compiled
-#    in by default once the app "provides its own" -- this app doesn't,
-#    the link fails (tud_descriptor_device_cb and friends undefined)
-#    without forcing it back on.
-#  - ENABLE_TINYUSB_INIT: controls whether stdio_usb_init() calls
-#    tusb_init() at all. Off, and nothing else in this codebase calls it
-#    either (PicoUsbKeyboard's tuh_init() only brings up the host role,
-#    rhport 1) -- the native USB peripheral hardware is simply never
-#    brought up. Not a timing/threading bug, the device is never
-#    initialized, full stop.
-#  - ENABLE_IRQ_BACKGROUND_TASK: guards stdio_usb_init()'s low-priority-IRQ
-#    installation that actually pumps tud_task() in the background. Off,
-#    and the device stack initializes (thanks to ENABLE_TINYUSB_INIT above)
-#    but never runs: stdio_usb.c's own inline tud_task() calls are gated
-#    behind stdio_usb_connected(), which can't become true until
-#    enumeration completes -- which needs tud_task() to run. Chicken-and-
-#    egg deadlock: USB HID keyboard works, but no /dev/ttyACM* ever
-#    appears.
-#  - The same gate appears a fourth time in pico_usb_reset's
-#    usb_reset_config.h, controlling the vendor "Reset" interface
-#    picotool's `load -x -f`/BOOTSEL-reboot depends on. Off, and the board
-#    still enumerates as CDC but picotool reports "Unable to locate reset
-#    interface on the device" -- BOOTSEL has to be entered by hand
-#    (button/power-cycle) from then on. MS_OS_20_DESCRIPTOR_ITF=2 is not
-#    optional alongside VIA_VENDOR_INTERFACE: stdio_usb_descriptors.c has
-#    an unconditional static_assert tying the two together (2 matches
-#    USBD_ITF_RPI_RESET, since CDC itself takes interfaces 0+1).
-target_compile_definitions(PicoDoom PRIVATE
-    PICO_STDIO_USB_USE_DEFAULT_DESCRIPTORS=1
-    PICO_STDIO_USB_ENABLE_TINYUSB_INIT=1
-    PICO_STDIO_USB_ENABLE_IRQ_BACKGROUND_TASK=1
-    PICO_ENABLE_USB_RESET_VIA_VENDOR_INTERFACE=1
-    PICO_USB_RESET_MS_OS_20_DESCRIPTOR_ITF=2
-    PICO_USB_RESET_SUPPORT_MS_OS_20_DESCRIPTOR=1
-    PICO_ENABLE_USB_RESET_VIA_BAUD_RATE=1
-)
+# beyond stdio_usb" -- every one is `!LIB_TINYUSB_HOST && !LIB_TINYUSB_DEVICE`-
+# gated, and LIB_TINYUSB_HOST becomes true the moment tinyusb_host is linked,
+# so leaving any of them at their new (off) default kills the native USB CDC
+# console (this whole project's primary debugging channel) silently, or
+# fails the build to link. Pico-Toolset's pico_toolset_usb_hid target sets
+# these PUBLIC on itself (components/usb_hid/CMakeLists.txt) precisely so
+# every consumer gets them for free instead of re-deriving and copy-pasting
+# this exact block -- see that target for the full derivation of what each
+# one does and why it was found the hard way.
 
 pico_enable_stdio_usb(PicoDoom 1)
 pico_enable_stdio_uart(PicoDoom 0)

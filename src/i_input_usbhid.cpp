@@ -1,10 +1,22 @@
-// I_StartTic (doom/i_system.h): polls the USB-PIO HID keyboard/mouse
-// (src/PicoUsbKeyboard.cpp, src/PicoUsbMouse.cpp) and posts DOOM
-// ev_keydown/ev_keyup/ev_mouse events for whatever changed since the last
-// tic -- Phase 3, see docs/PLAN.md. C++ driver behind a plain C interface,
-// same bridging pattern as src/i_video_ili9486.cpp.
-#include "PicoUsbKeyboard.hpp"
-#include "PicoUsbMouse.hpp"
+// USB HID keyboard/mouse input via Pico-Toolset's pico_toolset_usb_hid
+// (PIO-USB TinyUSB host). Also owns core1: this stack's SOF-timer IRQ binds
+// to whichever core calls tuh_init(), so init() happens from inside
+// core1_entry() (via UsbHidHost::init() with run_on_core1=false --
+// kWaveshareRp2350PiZeroLcdManualCore1 -- rather than letting init() spawn
+// and own core1 itself), letting this same core1 loop also drive
+// i_video_core1_step() (the ILI9486 chunked blit, src/i_video_ili9486.cpp)
+// interleaved with tuh_task() -- see i_video_core1.hpp for why that
+// interleaving (not one blocking per-frame blit call) matters: Pico-PIO-USB's
+// software-timed bus servicing would otherwise starve for the ~41ms a full
+// frame's SPI feed takes.
+//
+// I_StartTic (doom/i_system.h) polls the resulting keyboard/mouse state and
+// posts DOOM ev_keydown/ev_keyup/ev_mouse events for whatever changed since
+// the last tic -- Phase 3, see docs/PLAN.md. C++ driver behind a plain C
+// interface, same bridging pattern as src/i_video_ili9486.cpp.
+#include "pico_toolset/usb_hid_host.h"
+#include "pico_toolset/usb_hid_configs.h"
+#include "i_video_core1.hpp"
 
 extern "C" {
 #include "doomdef.h"
@@ -13,10 +25,38 @@ extern "C" {
 #include "doomstat.h" // mouseSensitivity, for F10/F11's driver-level adjust below
 }
 
+#include "pico/multicore.h"
+
 #include <cstdint>
 #include <cstdio>
 
 namespace {
+
+pico_toolset::UsbHidHost g_usb_hid;
+
+// core1's stack -- deliberately not the default multicore_launch_core1()
+// mechanism, which reserves PICO_CORE1_STACK_SIZE out of the tiny, fixed
+// SCRATCH_X SRAM bank (a couple KB at most -- too small for the TinyUSB host
+// stack + Pico-PIO-USB's own bit-banging call chains, per TOM6809's
+// real-hardware testing on this same board/library combination). 16KB
+// carved out of ordinary SRAM instead, matching TOM6809's validated size
+// (and pico_toolset_usb_hid's own run_on_core1=true default stack size).
+constexpr size_t kCore1StackWords = 4096; // 16KB
+uint32_t g_core1_stack[kCore1StackWords];
+
+void core1_entry()
+{
+    // run_on_core1=false: init() only brings up the host stack (tuh_init())
+    // on whichever core calls it -- here, core1, since this runs inside
+    // core1's own entry function -- and returns immediately rather than
+    // looping itself. This loop then drives both task() and the LCD blit
+    // stepper, so a pending frame's SPI feed can't starve USB servicing.
+    g_usb_hid.init(pico_toolset::configs::usb_hid::kWaveshareRp2350PiZeroLcdManualCore1);
+    while (true) {
+        pico_toolset::UsbHidHost::task();
+        i_video_core1_step();
+    }
+}
 
 // USB HID Usage Tables 1.12, table 12 (Keyboard/Keypad Page) usage IDs ->
 // DOOM keycodes (doomdef.h). Unmapped entries are 0 (never matches a real
@@ -83,8 +123,8 @@ uint8_t g_prev_mouse_buttons = 0;
 // rather than posted as ordinary DOOM keys, see hid_to_doom_key()'s doc
 // comment on why F10/F11/F12 aren't in that table. "On by default if mouse
 // detected": g_mouse_enabled starts true; whether anything actually gets
-// posted also depends on PicoUsbMouse::is_connected(), so no mouse plugged
-// in already behaves as "off" without touching this flag.
+// posted also depends on the mouse's presence, so no mouse plugged in
+// already behaves as "off" without touching this flag.
 bool g_mouse_enabled = true;
 bool g_prev_f10_down = false;
 bool g_prev_f11_down = false;
@@ -102,13 +142,23 @@ void post_key(int doomkey, bool down)
 
 } // namespace
 
+// Launches core1 (see core1_entry() above). Called once from main()
+// (src/PicoDoom.cpp), before D_DoomMain() -- gives the keyboard time to
+// enumerate while the WAD loads and the engine initializes, rather than
+// only starting once the game loop begins.
+extern "C" void usb_hid_core1_init(void)
+{
+    multicore_reset_core1(); // defensive, matches Pico-PIO-USB's own reference examples
+    multicore_launch_core1_with_stack(core1_entry, g_core1_stack, sizeof(g_core1_stack));
+}
+
 extern "C" void I_StartTic(void)
 {
     int i;
     bool ctrl, shift, alt;
     const uint8_t* keymap = hid_to_doom_key();
 
-    bool connected = PicoUsbKeyboard::is_keyboard_connected();
+    bool connected = g_usb_hid.connected_keyboard_count() > 0;
     if (connected != g_prev_connected) {
         printf("PicoDoom: USB keyboard %s\n", connected ? "connected" : "disconnected");
         g_prev_connected = connected;
@@ -118,26 +168,32 @@ extern "C" void I_StartTic(void)
         uint8_t doomkey = keymap[i];
         if (!doomkey)
             continue;
-        bool down = PicoUsbKeyboard::is_key_down(static_cast<uint8_t>(i));
+        bool down = g_usb_hid.is_key_down(static_cast<uint8_t>(i));
         if (down != g_prev_key_down[i]) {
             post_key(doomkey, down);
             g_prev_key_down[i] = down;
         }
     }
 
-    ctrl = PicoUsbKeyboard::is_modifier_down(PicoUsbKeyboard::kModLeftCtrl | PicoUsbKeyboard::kModRightCtrl);
+    // Boot-protocol modifier bitmask (USB HID 1.11 appendix B): bit0/4 =
+    // left/right Ctrl, bit1/5 = left/right Shift, bit2/6 = left/right Alt.
+    constexpr uint8_t kModLeftCtrl = 0x01, kModRightCtrl = 0x10;
+    constexpr uint8_t kModLeftShift = 0x02, kModRightShift = 0x20;
+    constexpr uint8_t kModLeftAlt = 0x04, kModRightAlt = 0x40;
+
+    ctrl = g_usb_hid.is_modifier_down(kModLeftCtrl | kModRightCtrl);
     if (ctrl != g_prev_ctrl) {
         post_key(KEY_RCTRL, ctrl);
         g_prev_ctrl = ctrl;
     }
 
-    shift = PicoUsbKeyboard::is_modifier_down(PicoUsbKeyboard::kModLeftShift | PicoUsbKeyboard::kModRightShift);
+    shift = g_usb_hid.is_modifier_down(kModLeftShift | kModRightShift);
     if (shift != g_prev_shift) {
         post_key(KEY_RSHIFT, shift);
         g_prev_shift = shift;
     }
 
-    alt = PicoUsbKeyboard::is_modifier_down(PicoUsbKeyboard::kModLeftAlt | PicoUsbKeyboard::kModRightAlt);
+    alt = g_usb_hid.is_modifier_down(kModLeftAlt | kModRightAlt);
     if (alt != g_prev_alt) {
         post_key(KEY_RALT, alt);
         g_prev_alt = alt;
@@ -147,9 +203,9 @@ extern "C" void I_StartTic(void)
     // (fire once per physical press, not once per poll while held), and
     // consumed here rather than posted as DOOM keys (see hid_to_doom_key()).
     {
-        bool f10_down = PicoUsbKeyboard::is_key_down(0x43);
-        bool f11_down = PicoUsbKeyboard::is_key_down(0x44);
-        bool f12_down = PicoUsbKeyboard::is_key_down(0x45);
+        bool f10_down = g_usb_hid.is_key_down(0x43);
+        bool f11_down = g_usb_hid.is_key_down(0x44);
+        bool f12_down = g_usb_hid.is_key_down(0x45);
 
         if (f12_down && !g_prev_f12_down) {
             g_mouse_enabled = !g_mouse_enabled;
@@ -172,19 +228,33 @@ extern "C" void I_StartTic(void)
     }
 
     {
-        bool mouse_connected = PicoUsbMouse::is_connected();
-        if (mouse_connected != g_prev_mouse_connected) {
-            printf("PicoDoom: USB mouse %s\n", mouse_connected ? "connected" : "disconnected");
-            g_prev_mouse_connected = mouse_connected;
+        pico_toolset::UsbHidHost::MouseState mouse = g_usb_hid.mouse_state();
+        if (mouse.present != g_prev_mouse_connected) {
+            printf("PicoDoom: USB mouse %s\n", mouse.present ? "connected" : "disconnected");
+            g_prev_mouse_connected = mouse.present;
         }
 
-        if (mouse_connected) {
-            uint8_t buttons = PicoUsbMouse::buttons();
+        if (mouse.present) {
+            // d_event.h's ev_mouse data1 convention: bit0/1/2 = left/right/
+            // middle, matching G_Responder's mousebuttons[0..2] = data1 & 1/2/4.
+            uint8_t buttons = static_cast<uint8_t>((mouse.left_button ? 1 : 0) |
+                                                    (mouse.right_button ? 2 : 0) |
+                                                    (mouse.middle_button ? 4 : 0));
             int dx = 0, dy = 0;
             // Always drain the accumulator, even while disabled -- so
             // toggling back on with F12 doesn't dump a backlog of stale
-            // movement into the next tic.
-            PicoUsbMouse::take_delta(&dx, &dy);
+            // movement into the next tic. consume_mouse_delta() gives raw,
+            // unclamped relative movement (unlike mouse_state()'s x/y,
+            // which is an absolute cursor clamped to UsbHidConfig's
+            // mouse_max_x/y -- wrong for mouselook, since turning would cap
+            // out once that virtual cursor pinned at an edge).
+            g_usb_hid.consume_mouse_delta(dx, dy);
+            // Y inverted from the raw HID report to match DOOM's convention
+            // (push the mouse away from you -> positive data3 -> move
+            // forward), mirroring the original X11 driver's own
+            // MotionNotify handling (doom/i_video.c:
+            // `lastmousey - X_event.xmotion.y`).
+            dy = -dy;
             // Matches the original X11 driver's own gate (doom/i_video.c's
             // MotionNotify handling): only post when something actually
             // changed, not an empty event every idle tic.

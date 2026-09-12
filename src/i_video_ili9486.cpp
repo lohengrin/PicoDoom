@@ -1,13 +1,13 @@
 // Real video driver for the Pico port: replaces doom/i_video_null.c.
 // Blits DOOM's 320x200 palette-indexed screens[0] to the Waveshare 3.5"
-// ILI9486 LCD via Ili9486Display, 1:1 (no scaling), centered on the panel's
+// ILI9486 LCD via Pico-Toolset's pico_toolset::Ili9486, 1:1 (no scaling), centered on the panel's
 // 480x320 landscape frame in an 80px/60px border -- see docs/PLAN.md
 // Phase 2. Was briefly upscaled 3:2 to fill the panel (320x200 -> 480x300),
 // reverted: SPI feed time turned out to scale with byte count as expected
 // (DMA vs. spi_write_blocking made no measurable difference -- the
 // bottleneck is bus throughput, not CPU-side overhead), so fewer bytes
 // wins until the achieved SPI clock is sorted out (see the one-shot log
-// in Ili9486Display::set_window()). C++ driver behind a plain C
+// in pico_toolset::Ili9486::set_window()). C++ driver behind a plain C
 // interface, same bridging pattern as src/PicoDoom.cpp.
 //
 // Phase 4.5 (performance): I_FinishUpdate() (core0) no longer does the
@@ -39,7 +39,8 @@
 // memcpy'ing it into g_screen_buf[next] (one SRAM, one PSRAM, unchanged
 // from Phase 4.6.1 -- see that buffer's own doc comment) each frame and
 // handing the index to core1, same shape as the original Phase 4.5 design.
-#include "Ili9486Display.hpp"
+#include "pico_toolset/ili9486.h"
+#include "pico_toolset/ili9486_configs.h"
 #include "pico_toolset/psram.h"
 #include "i_video_core1.hpp"
 
@@ -66,13 +67,13 @@ extern "C" char __StackLimit;
 extern "C" char __bss_end__;
 
 namespace {
-Ili9486Display g_display;
+pico_toolset::Ili9486 g_display;
 uint16_t g_rgb565_wire_lut[256];
 
 constexpr int kDstWidth = SCREENWIDTH;   // 320, 1:1 -- see file header
 constexpr int kDstHeight = SCREENHEIGHT; // 200
-constexpr int kOffsetX = (Ili9486Display::kWidth - kDstWidth) / 2;   // 80
-constexpr int kOffsetY = (Ili9486Display::kHeight - kDstHeight) / 2; // 60
+constexpr int kOffsetX = (pico_toolset::Ili9486::kWidth - kDstWidth) / 2;   // 80
+constexpr int kOffsetY = (pico_toolset::Ili9486::kHeight - kDstHeight) / 2; // 60
 
 // core1's per-call blit granularity (see i_video_core1_step() below):
 // convert+DMA-transfer this many rows per call. TRIED 8 (on the theory that
@@ -226,7 +227,7 @@ void I_InitGraphics(void) {
     // read if that ever stops being true.
     memset(g_screen_buf[1], 0, SCREENWIDTH * SCREENHEIGHT);
 
-    g_display.init();
+    g_display.init(pico_toolset::configs::ili9486::kWaveshareRp2350PiZero);
     // Black out the whole panel once, independent of any palette/game state
     // -- confirms the panel is alive and gives a clean border around the
     // centered scaled game viewport that I_FinishUpdate never touches. Runs
@@ -246,7 +247,7 @@ void I_SetPalette(byte* palette) {
         byte b = gammatable[usegamma][*palette++];
         uint16_t rgb565 = static_cast<uint16_t>(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
         // Byte-swapped for MSB-first-over-SPI wire order (see
-        // Ili9486Display::write_pixels()).
+        // pico_toolset::Ili9486::write_pixels()).
         g_rgb565_wire_lut[i] = static_cast<uint16_t>((rgb565 << 8) | (rgb565 >> 8));
     }
 }
