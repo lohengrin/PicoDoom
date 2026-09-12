@@ -29,6 +29,14 @@ rcsid[] = "$Id: r_draw.c,v 1.4 1997/02/03 16:47:55 b1 Exp $";
 
 #include <stdint.h>
 
+#ifdef PICO
+// __not_in_flash_func() -- see R_DrawColumn/R_DrawColumnLow/
+// R_DrawTranslatedColumn/R_DrawSpan/R_DrawSpanLow's signatures below.
+// pico.h, not pico/platform.h directly (the latter refuses direct
+// inclusion outside the SDK's own headers).
+#include "pico.h"
+#endif
+
 #include "doomdef.h"
 
 #include "i_system.h"
@@ -103,7 +111,15 @@ int			dccount;
 // Thus a special case loop for very fast rendering can
 //  be used. It has also been used with Wolfenstein 3D.
 // 
+#ifdef PICO
+// Single hottest inner loop in the renderer (see the #ifdef PICO comment
+// inside, on the reload-caching already applied here) -- keep it out of
+// flash entirely so per-pixel instruction fetches don't pay XIP latency,
+// 2026-09 performance work. Untested on real hardware as of this comment.
+void __not_in_flash_func(R_DrawColumn) (void)
+#else
 void R_DrawColumn (void)
+#endif
 {
     int			count;
     byte*		dest;
@@ -226,7 +242,11 @@ void R_DrawColumn (void)
 #endif
 
 
+#ifdef PICO
+void __not_in_flash_func(R_DrawColumnLow) (void)
+#else
 void R_DrawColumnLow (void)
+#endif
 {
     int			count;
     byte*		dest;
@@ -409,7 +429,11 @@ void R_DrawFuzzColumn (void)
 byte*	dc_translation;
 byte*	translationtables;
 
+#ifdef PICO
+void __not_in_flash_func(R_DrawTranslatedColumn) (void)
+#else
 void R_DrawTranslatedColumn (void)
+#endif
 {
     int			count;
     byte*		dest;
@@ -555,7 +579,11 @@ int			dscount;
 
 //
 // Draws the actual span.
+#ifdef PICO
+void __not_in_flash_func(R_DrawSpan) (void)
+#else
 void R_DrawSpan (void)
+#endif
 {
     fixed_t		xfrac;
     fixed_t		yfrac;
@@ -695,7 +723,11 @@ void R_DrawSpan (void)
 //
 // Again..
 //
+#ifdef PICO
+void __not_in_flash_func(R_DrawSpanLow) (void)
+#else
 void R_DrawSpanLow (void)
+#endif
 {
     fixed_t		xfrac;
     fixed_t		yfrac;
