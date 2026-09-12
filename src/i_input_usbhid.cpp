@@ -292,15 +292,19 @@ extern "C" void I_StartTic(void)
             constexpr int kStickCenter = 128;
             constexpr int kDeadzone = 40; // out of 128 each direction from center
             int lx = static_cast<int>(pad.lx) - kStickCenter;
-            // Inverted from the naive "high pad.ly = down" reading (real-hardware
-            // finding: pushing the stick back/down moved the player forward).
+            // NOT inverted -- pico_toolset::UsbHidHost::gamepad_state()'s
+            // documented convention is "high ly = down", matching this
+            // reading directly. An apparent inversion here (real-hardware
+            // finding, 2026-09) turned out to be a real Pico-Toolset bug
+            // instead: scale_axis() could silently wrap at one extreme of
+            // an XInput stick's range (see that component's usb_hid_host.cpp),
+            // which reads as a sign error at large deflection but is
+            // actually non-monotonic overflow -- inverting the reading here
+            // "fixed" small deflections while making large ones worse.
             // Checked first for the ARM/x86 char-signedness class of bug this
-            // project hit before (docs/PLAN.md) -- ruled out: GamepadState and
-            // this whole path use uint8_t/int16_t throughout, no plain `char`
-            // anywhere. This is a genuine axis-convention mismatch instead --
-            // D-pad up/down are separate button bits, read independently of
-            // pad.ly, which is why they weren't affected.
-            int ly = kStickCenter - static_cast<int>(pad.ly);
+            // project hit before (docs/PLAN.md) -- ruled out: this whole path
+            // uses uint8_t/int16_t throughout, no plain `char` anywhere.
+            int ly = static_cast<int>(pad.ly) - kStickCenter;
             int joyx = (lx > kDeadzone) ? 1 : (lx < -kDeadzone) ? -1 : 0;
             int joyy = (ly > kDeadzone) ? 1 : (ly < -kDeadzone) ? -1 : 0;
             // D-pad overrides the stick when held -- it's inherently digital,
