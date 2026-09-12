@@ -176,6 +176,22 @@ src/i_input_usbhid.cpp
 ${DOOMSRC}
 )
 
+# LTO tried (2026-09 performance work) and reverted: enabling
+# INTERPROCEDURAL_OPTIMIZATION on this target fails at link time with a
+# GCC/assembler "offset out of range" error during LTO code generation,
+# unfixed by either -mlong-calls or -flto-partition=none (same failure,
+# same translation unit, both times). Likely aggravated by how much ends
+# up in this one LTO unit: pico_toolset_usb_hid brings in TinyUSB/
+# Pico-PIO-USB/FatFs as direct sources of the PicoDoom target itself (see
+# the target_link_libraries comment below), not a separate static library,
+# so LTO here means combining thousands of USB-stack functions with all of
+# Doom's C code in one pass -- not just Doom's own hot loops as intended.
+# Motivation was doom/r_draw.c's #ifdef PICO reload-caching blocks (GCC,
+# compiling one .c file at a time, couldn't prove hot loops' *dest stores
+# didn't alias file-scope globals like dc_source/dc_colormap); LTO might
+# have caught that class of thing elsewhere too, but isn't worth chasing
+# this toolchain limitation to find out.
+
 # pico_toolset_sdcard (uSD/FatFs + POSIX stdio shim), pico_toolset_psram
 # (QMI PSRAM), pico_toolset_fault_handler (hard-fault -> next-boot report),
 # pico_toolset_ili9486 (LCD over SPI1, DMA-fed pixel pushes -- brings in
