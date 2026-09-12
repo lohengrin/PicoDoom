@@ -1,3 +1,17 @@
+# == DO NOT EDIT THE FOLLOWING LINES for the Raspberry Pi Pico VS Code Extension to work ==
+if(WIN32)
+    set(USERHOME $ENV{USERPROFILE})
+else()
+    set(USERHOME $ENV{HOME})
+endif()
+set(sdkVersion 2.3.1)
+set(toolchainVersion 15_2_Rel1)
+set(picotoolVersion 2.3.1)
+set(picoVscode ${USERHOME}/.pico-sdk/cmake/pico-vscode.cmake)
+if (EXISTS ${picoVscode})
+    include(${picoVscode})
+endif()
+# ====================================================================================
 cmake_minimum_required(VERSION 3.13)
 
 # Target board: Waveshare RP2350-PiZero. Use our boards/waveshare_rp2350_pizero.h
@@ -151,11 +165,24 @@ doom/sounds.c
 # on the command line, and GCC treats it as a blanket override regardless
 # of position) restores this project's own "zero warnings" bar to mean
 # what it always meant: clean on the code we actually maintain.
+#
+# -fno-strict-aliasing on every DOOMSRC file (2026-09, added while chasing
+# the demo/gameplay freeze investigated in docs/PLAN.md): a freeze that
+# reproduced in Release/RelWithDebInfo but not Debug -- i.e. only with
+# GCC's optimizer active -- looked at the time like the textbook signature
+# of a strict-aliasing violation (-fstrict-aliasing only takes effect from
+# -O2, and this 1993 codebase reinterprets raw WAD lump bytes as
+# patch_t/mobj_t/etc. through pointer casts constantly, exactly the
+# pattern that violates it). Turned out not to be the actual cause -- the
+# real bug was a type-punning read in st_stuff.c's w_arms[] widget,
+# unrelated to aliasing -- but kept anyway: it's still the right, standard
+# thing to build 1993-vintage C against with a modern optimizing compiler,
+# regardless of whether it explained this specific freeze.
 foreach(f ${DOOMSRC})
     if(NOT f MATCHES "d_main\\.c$")
-        set_source_files_properties(${f} PROPERTIES COMPILE_OPTIONS "-std=gnu90;-w")
+        set_source_files_properties(${f} PROPERTIES COMPILE_OPTIONS "-std=gnu90;-w;-fno-strict-aliasing")
     else()
-        set_source_files_properties(${f} PROPERTIES COMPILE_OPTIONS "-w")
+        set_source_files_properties(${f} PROPERTIES COMPILE_OPTIONS "-w;-fno-strict-aliasing")
     endif()
 endforeach()
 
