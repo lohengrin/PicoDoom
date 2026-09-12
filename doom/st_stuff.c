@@ -389,6 +389,24 @@ static int	st_faceindex = 0;
 // holds key-type for each key box on bar
 static int	keyboxes[3]; 
 
+#ifdef PICO
+// Bug fix (see docs/PLAN.md demo-freeze investigation): w_arms[]'s
+// STlib_initMultIcon() call used to hand it `(int *) &plyr->weaponowned[i+1]`
+// directly -- reading player_t's `boolean weaponowned[]` array through an
+// `int*` and dereferencing all 4 bytes. That's harmless on original Linux
+// DOOM, where `boolean` was an int-sized enum, but doomtype.h makes
+// `boolean` a real 1-byte `bool` for `PICO`/C++ builds (see its
+// `#if defined(__cplusplus) || defined(PICO)` branch) -- so this was
+// reading 3 bytes past the intended single flag, composing a garbage
+// "icon index" out of whatever adjacent `weaponowned[]` entries (or, for
+// the last arm, player_t fields past the end of the array) happened to
+// hold, then indexing the 2-entry `arms[i][]` patch-pointer array with it.
+// Same pattern as `keyboxes[]` above (a real, correctly-sized `int` mirror,
+// refreshed every tic in ST_updateWidgets) fixes it properly instead of
+// reading through the boolean array's own storage.
+static int	armsowned[6];
+#endif
+
 // a random number per tick
 static int	st_randomnumber;  
 
@@ -958,6 +976,12 @@ void ST_updateWidgets(void)
 	    keyboxes[i] = i+3;
     }
 
+#ifdef PICO
+    // See armsowned[]'s doc comment above.
+    for (i=0;i<6;i++)
+	armsowned[i] = plyr->weaponowned[i+1];
+#endif
+
     // refresh everything if this is him coming back to life
     ST_updateFaceWidget();
 
@@ -1319,7 +1343,11 @@ void ST_createWidgets(void)
 	STlib_initMultIcon(&w_arms[i],
 			   ST_ARMSX+(i%3)*ST_ARMSXSPACE,
 			   ST_ARMSY+(i/3)*ST_ARMSYSPACE,
+#ifdef PICO
+			   arms[i], &armsowned[i],
+#else
 			   arms[i], (int *) &plyr->weaponowned[i+1],
+#endif
 			   &st_armson);
     }
 

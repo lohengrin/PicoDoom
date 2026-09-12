@@ -608,6 +608,14 @@ R_StoreWallRange
 	{
 	    // masked midtexture
 	    maskedtexture = true;
+#ifdef PICO
+	    // See r_plane.h's #ifdef PICO comment: bounds-check before the
+	    // advance, not after -- vanilla only checked in R_DrawPlanes,
+	    // once per frame, well after this write could already have run
+	    // past openings[]'s end.
+	    if (lastopening + (rw_stopx - rw_x) > openings + MAXOPENINGS)
+		I_Error ("R_StoreWallRange: lastopening overflow (masked texture column)");
+#endif
 	    ds_p->maskedtexturecol = maskedtexturecol = lastopening - rw_x;
 	    lastopening += rw_stopx - rw_x;
 	}
@@ -718,6 +726,11 @@ R_StoreWallRange
     if ( ((ds_p->silhouette & SIL_TOP) || maskedtexture)
 	 && !ds_p->sprtopclip)
     {
+#ifdef PICO
+	// See r_plane.h's #ifdef PICO comment.
+	if (lastopening + (rw_stopx - start) > openings + MAXOPENINGS)
+	    I_Error ("R_StoreWallRange: lastopening overflow (top sprite clip)");
+#endif
 	memcpy (lastopening, ceilingclip+start, 2*(rw_stopx-start));
 	ds_p->sprtopclip = lastopening - start;
 	lastopening += rw_stopx - start;
@@ -726,6 +739,11 @@ R_StoreWallRange
     if ( ((ds_p->silhouette & SIL_BOTTOM) || maskedtexture)
 	 && !ds_p->sprbottomclip)
     {
+#ifdef PICO
+	// See r_plane.h's #ifdef PICO comment.
+	if (lastopening + (rw_stopx - start) > openings + MAXOPENINGS)
+	    I_Error ("R_StoreWallRange: lastopening overflow (bottom sprite clip)");
+#endif
 	memcpy (lastopening, floorclip+start, 2*(rw_stopx-start));
 	ds_p->sprbottomclip = lastopening - start;
 	lastopening += rw_stopx - start;	

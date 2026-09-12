@@ -169,6 +169,7 @@ src/i_video_ili9486.cpp
 src/PicoUsbKeyboard.cpp
 src/PicoUsbMouse.cpp
 src/i_input_usbhid.cpp
+src/FaultHandler.cpp
 ${PICO_TINYUSB_PATH}/src/portable/raspberrypi/pio_usb/hcd_pio_usb.c
 ${DOOMSRC}
 )

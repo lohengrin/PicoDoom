@@ -151,7 +151,17 @@ typedef struct
     }			d;
 } intercept_t;
 
+#ifdef PICO
+// Vanilla's 128 is easily exceeded by a long P_PathTraverse trace through
+// busy geometry (see doom/p_maputl.c's PIT_AddLineIntercepts/
+// PIT_AddThingIntercepts #ifdef PICO comments -- confirmed as the likely
+// cause of a reproducible hard freeze on this hardware, docs/PLAN.md).
+// intercept_t is ~12 bytes; even 8x headroom is a trivial ~12KB SRAM
+// cost against the current ~136KB budget.
+#define MAXINTERCEPTS	1024
+#else
 #define MAXINTERCEPTS	128
+#endif
 
 extern intercept_t	intercepts[MAXINTERCEPTS];
 extern intercept_t*	intercept_p;

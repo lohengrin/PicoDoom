@@ -101,6 +101,9 @@ void P_AllocateThinker (thinker_t*	thinker)
 void P_RunThinkers (void)
 {
     thinker_t*	currentthinker;
+#ifdef PICO
+    thinker_t*	next;
+#endif
 
     currentthinker = thinkercap.next;
     while (currentthinker != &thinkercap)
@@ -110,7 +113,26 @@ void P_RunThinkers (void)
 	    // time to remove it
 	    currentthinker->next->prev = currentthinker->prev;
 	    currentthinker->prev->next = currentthinker->next;
+#ifdef PICO
+	    // Use-after-free, present in id Software's original source: the
+	    // unmodified code below reads currentthinker->next *after*
+	    // Z_Free(currentthinker) has already freed that exact block --
+	    // undefined behavior. It "worked" on the original target only
+	    // because that build's Z_Free happened to leave the freed
+	    // block's payload bytes untouched immediately after the call (no
+	    // other allocation runs in between). Not this port's actual
+	    // demo-freeze bug (see docs/PLAN.md -- that turned out to be a
+	    // type-punning bug in st_stuff.c), but real undefined behavior
+	    // regardless, worth fixing on its own merits: capture `next`
+	    // from the list *before* freeing, instead of re-reading it
+	    // through the already-freed pointer afterward.
+	    next = currentthinker->next;
 	    Z_Free (currentthinker);
+	    currentthinker = next;
+	    continue;
+#else
+	    Z_Free (currentthinker);
+#endif
 	}
 	else
 	{

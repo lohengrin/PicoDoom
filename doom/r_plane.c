@@ -56,7 +56,12 @@ visplane_t*		floorplane;
 visplane_t*		ceilingplane;
 
 // ?
+#ifndef PICO
+// Under PICO, both now come from r_plane.h instead -- see its #ifdef PICO
+// comment (r_segs.c needs MAXOPENINGS too, to bounds-check before writing
+// through lastopening, not just here, after the fact).
 #define MAXOPENINGS	SCREENWIDTH*64
+#endif
 short			openings[MAXOPENINGS];
 short*			lastopening;
 

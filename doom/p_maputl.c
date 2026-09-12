@@ -600,6 +600,20 @@ PIT_AddLineIntercepts (line_t* ld)
     }
     
 	
+#ifdef PICO
+    // Temporary diagnostic, now a permanent fix (see docs/PLAN.md): same
+    // class of bug as r_segs.c's openings[] overflow -- intercepts[] is
+    // written via intercept_p++ with no bounds check anywhere in the
+    // original source. MAXINTERCEPTS is only 128, easily exceeded by a
+    // long P_PathTraverse trace through busy geometry (P_CheckSight,
+    // called by PIT_RadiusAttack for a barrel explosion, and P_UseLines
+    // for a secret door both do exactly this) -- silently overflowing
+    // into whatever .bss data happens to follow intercepts[], instead of
+    // erroring. Turn it into a controlled I_Error() instead.
+    if (intercept_p - intercepts >= MAXINTERCEPTS)
+	I_Error ("PIT_AddLineIntercepts: intercepts overflow (MAXINTERCEPTS=%d)",
+		 MAXINTERCEPTS);
+#endif
     intercept_p->frac = frac;
     intercept_p->isaline = true;
     intercept_p->d.line = ld;
@@ -665,6 +679,12 @@ boolean PIT_AddThingIntercepts (mobj_t* thing)
     if (frac < 0)
 	return true;		// behind source
 
+#ifdef PICO
+    // See PIT_AddLineIntercepts's #ifdef PICO comment -- same fix.
+    if (intercept_p - intercepts >= MAXINTERCEPTS)
+	I_Error ("PIT_AddThingIntercepts: intercepts overflow (MAXINTERCEPTS=%d)",
+		 MAXINTERCEPTS);
+#endif
     intercept_p->frac = frac;
     intercept_p->isaline = false;
     intercept_p->d.thing = thing;

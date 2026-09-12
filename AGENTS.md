@@ -234,6 +234,9 @@ src/PicoUsbKeyboard.cpp/.hpp # USB-PIO HID keyboard host on core1 (Phase 3); own
 src/PicoUsbMouse.cpp/.hpp    # USB HID mouse (Phase 3), dispatched from PicoUsbKeyboard's callbacks
 src/i_input_usbhid.cpp       # I_StartTic: HID reports -> DOOM event_t/D_PostEvent
 src/tusb_config.h            # TinyUSB config: device (stdio_usb) + host (keyboard)
+src/FaultHandler.cpp         # isr_hardfault override: stashes PC/LR/CFSR in watchdog
+                              # scratch regs + reboots (SDK default is a silent bkpt #0);
+                              # PicoDoom.cpp's main() reports it on the next boot
 boards/               # waveshare_rp2350_pizero.h (adds PSRAM CS + PIO-USB pins)
 doom/                 # upstream DOOM 1.10 + null i_* stubs + PICO guards
 doom/i_sound_null.c   # sound stub

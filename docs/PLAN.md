@@ -144,6 +144,190 @@ class of "relies on the platform's incidental memory layout" bug as the
 sentinel-*value* problem (boolean-size-related) -- it's an out-of-bounds
 *read* that both platforms technically commit, one just gets away with it.
 
+Eleventh bug, found chasing a reproducible mid-game hard freeze
+(2026-09-11) -- gameplay, not a boot issue like the others, and the first
+one that wasn't caused by a platform-specific type-size/layout difference.
+Reported as "freezes running the demo by itself, always at the same
+point"; bisected entirely through printf instrumentation rather than
+static analysis, since the freeze prints nothing (silent, no `I_Error`) --
+the exact signature of a genuine infinite loop, not a controlled failure:
+1. A periodic `gametic` heartbeat in `G_Ticker()` (`doom/g_game.c`),
+   unconditional (not gated on `demoplayback`) since the user suspected it
+   might be level-content-triggered rather than demo-specific, narrowed
+   the freeze to a ~35-tic (1s) window, then to the exact tic pair
+   (830/831) once narrowed further with a per-tic version of the same
+   print restricted to that window.
+2. Added periodic calls to `Z_CheckHeap()` (`doom/z_zone.c`) -- DOOM's own
+   built-in zone-heap corruption checker, normally only called once, right
+   after a level loads -- alongside the heartbeat, on the theory that a
+   corrupted block list could cause exactly this kind of silent hang
+   (`Z_Malloc`'s purge-scan loop has no bound if the list is broken).
+   `Z_CheckHeap()` passed clean on every tic right up to the freeze,
+   ruling that specific failure mode out.
+3. The user's own qualitative report -- "close after a barrel exploding and
+   while opening a secret wall" -- pointed at thinker removal (a killed
+   barrel's mobj gets torn down) as the trigger. Checked
+   `P_RunThinkers()` (`doom/p_tick.c`) and found a real, well-known bug in
+   id Software's own original source: when removing a thinker, the code
+   calls `Z_Free(currentthinker)` and then reads
+   `currentthinker = currentthinker->next` -- **after** that exact memory
+   was just freed. Undefined behavior that happened to "work" on the
+   original target only because that build's `Z_Free` doesn't touch a
+   freed block's payload bytes immediately, with no other allocation
+   between the free and the read. `doom/z_zone.c` is unmodified vanilla
+   code here (confirmed no `#ifdef PICO` divergence), so this isn't a
+   behavior difference in the allocator itself -- more likely this port's
+   different allocation history (PSRAM zone, different lazy-loading
+   pattern from `precache=false` during demo playback) produces a heap
+   layout where the freed block's `next` field doesn't happen to survive
+   intact, and the thinker-list walk then follows a garbage pointer that
+   never finds its way back to the list's `&thinkercap` sentinel --
+   spinning forever, silently, matching every observed symptom exactly
+   (no error, fully reproducible, tied to a thinker-removal event).
+   Fixed under `#ifdef PICO` by capturing `next` from the list *before*
+   calling `Z_Free`, instead of re-reading it through the already-freed
+   pointer afterward -- the standard fix several other source ports
+   (Chocolate Doom included) apply for this exact bug.
+
+   **Hardware result: real but incomplete.** Same repro, freeze moved from
+   tic 829 to 832 -- confirms the fix had a genuine effect (not a no-op),
+   but something else hangs 3 tics later. Checked `doom/p_saveg.c`'s
+   `P_UnArchiveThinkers()` for the same anti-pattern (it also frees
+   thinkers mid-walk) -- already correctly captures `next` before freeing,
+   not a second instance of this bug.
+
+   Reconsidered the user's own description -- a secret door revealing a
+   lot of new geometry at once -- against a *second*, better-known vanilla
+   DOOM bug: `doom/r_segs.c`'s `R_StoreWallRange()` writes into
+   `openings[]` (via `lastopening`, 3 sites: masked-texture columns, top/
+   bottom sprite clip) with **no bounds check at the write site at all**.
+   The only check in the original source (`r_plane.c`'s `R_DrawPlanes()`)
+   runs once per frame, *after* every wall for that frame -- including
+   whichever one overflows -- has already been rendered. A silent
+   out-of-bounds write into whatever `.bss` data happens to follow
+   `openings[MAXOPENINGS]` (20480 entries), not a crash or an error, just
+   quiet corruption of something else -- exactly the kind of thing that
+   could corrupt an unrelated structure like the thinker list, explaining
+   why fixing the thinker-list symptom shifted the freeze without curing
+   it. A sudden reveal of lots of new wall segments in one frame (a secret
+   door opening) is precisely the scenario that pushes `lastopening`
+   furthest.
+
+   Fixed under `#ifdef PICO`: moved `MAXOPENINGS`/`openings[]` into
+   `r_plane.h` (previously local to `r_plane.c`) so `r_segs.c` can see the
+   real bound, and added a check before each of the 3 write/advance sites
+   -- turns the silent corruption into a controlled `I_Error()` naming
+   which one hit the limit, instead of corrupting memory quietly.
+
+   **Hardware result: ruled out.** Same repro, `lastopening` never
+   overflowed (no `R_StoreWallRange` error) -- freeze still happened,
+   this time at tic 831 (829, then 832, now 831 across three builds).
+   Demo playback is fully deterministic -- the recorded demo drives every
+   input, nothing reads a live clock or real controls -- so a stable bug
+   should freeze on the exact same tic every time. Drifting by a tic or two
+   with every code change, instead, points at memory corruption whose
+   visible symptom depends on exact `.bss` layout, which shifts slightly
+   whenever code is added anywhere in the program.
+
+   Rather than keep guessing at named functions one at a time (three
+   hardware round-trips so far), instrumented the two loops most likely to
+   actually be the one hanging, directly: `P_RunThinkers()`'s thinker-list
+   walk (`doom/p_tick.c`, the loop containing the already-fixed
+   use-after-free) and `P_BlockThingsIterator()`'s blockmap-cell walk
+   (`doom/p_maputl.c`, walked by `PIT_RadiusAttack` -- the barrel
+   explosion's own damage pass, which can kill other things mid-walk).
+   Both get a generous step bound (100000 -- no real DOOM II level's
+   thinker count or single blockmap cell's occupancy comes remotely close)
+   that turns "spins forever, silently" into a named, controlled
+   `I_Error()` if either list's traversal is actually what never
+   terminates.
+
+   **Hardware result: both cleared.** Neither bound tripped; freeze still
+   happened, this time at tic 830 (829, 832, 831, now 830 across four
+   builds) -- consistent with the same layout-dependent-corruption pattern
+   continuing, just not caused by either of these two loops specifically.
+
+   Looked one level further into what `PIT_RadiusAttack`'s `P_CheckSight`
+   call actually does: `P_PathTraverse()` (`doom/p_maputl.c`) builds a list
+   of `intercepts[]` (every line/thing crossed along a traced line) via
+   `PIT_AddLineIntercepts()`/`PIT_AddThingIntercepts()`, both of which
+   write through `intercept_p++` with **no bounds check anywhere in the
+   original source** -- the exact same unchecked-array-write pattern as
+   `openings[]` above, except `MAXINTERCEPTS` is only **128** entries (vs.
+   `openings[]`'s 20480), and `P_PathTraverse()` is used by both of the
+   user's described trigger events: `P_CheckSight` (the barrel
+   explosion's own sight-check) and `P_UseLines` (a secret door). A long
+   trace through busy geometry -- exactly what a newly-revealed secret
+   area produces -- can plausibly exceed 128 crossings.
+
+   Given the strength of the fit and how cheap `intercept_t` is (~12
+   bytes), fixed more decisively this time instead of just adding a
+   diagnostic: bounds-checked both write sites (`I_Error()` instead of
+   silent overflow, same as `openings[]`) *and* raised `MAXINTERCEPTS`
+   from 128 to 1024 under `#ifdef PICO` (`doom/p_local.h`) -- confirmed via
+   the linker map: `intercepts[]` is now exactly 12288 bytes (12KB), heap
+   budget still ~126KB free, comfortably above what's needed.
+
+   **Hardware result: cleared too.** No new error, freeze still happened
+   (tic 831 this time -- 829/832/831/830/831 across five builds, still
+   wobbling in the same narrow band).
+
+   Checked one more well-known DOOM danger zone: `P_SetMobjState()`
+   (`doom/p_mobj.c`) chains through zero-tic states in a `do { ... } while
+   (!mobj->tics)` loop with **no bound at all** -- if a state chain ever
+   cycles (corrupted `states[]` data, or a corrupted `state`/`mobj->tics`
+   value reaching this call), this hangs immediately, entirely self-
+   contained, no other function involved. This is literally what drives a
+   barrel's explosion animation. Added the same style of step bound (1000
+   -- no real DOOM state chain is remotely this long) to confirm or rule
+   this out too. ⏳ Not yet confirmed on hardware.
+
+   Running tally of what's been fixed regardless of whether it's *the*
+   cause (all real, confirmed-unchecked-write or confirmed-UB bugs, worth
+   having fixed either way): `P_RunThinkers()` use-after-free (bug #11,
+   confirmed real -- shifted the freeze point when fixed), `r_segs.c`'s
+   `openings[]` overflow (checked, not implicated), `intercepts[]`
+   overflow (checked, not implicated, headroom raised regardless).
+
+   **Hardware result: cleared too, same tic (831) as the previous test.**
+   Six hardware round-trips now, all testing the same theory -- some loop
+   spins forever -- and all six coming back clean, including
+   `P_SetMobjState()`'s completely self-contained state-chain loop. That
+   run of clean results is itself the signal: reconsidered the theory
+   rather than the eighth candidate loop.
+
+   A silent freeze with *zero* output isn't only what an infinite loop
+   looks like -- it's also exactly what an unhandled CPU hard fault looks
+   like (an invalid memory access, or calling through a corrupted function
+   pointer -- `state_t::action`, `thinker_t::function` -- and jumping to
+   garbage). Checked what this build's fault handling actually does:
+   `src/rp2_common/pico_crt0/crt0.S`'s `isr_hardfault` is a *weak* symbol
+   whose default body is a single `bkpt #0` -- no debug probe attached (this
+   board runs standalone over USB CDC), so that instruction executes
+   silently and leaves the core halted. No message, no reboot, nothing:
+   indistinguishable from every one of the six "infinite loop" hypotheses
+   already tested, and none of those loop-bound guards can ever catch it,
+   because nothing is actually looping.
+
+   Added `src/FaultHandler.cpp`: a real `isr_hardfault` (a strong symbol
+   overrides the SDK's weak default -- confirmed via the linked ELF's
+   vector table, which now points at it) that prints the faulting PC/LR
+   and the standard Cortex-M fault status registers (CFSR/HFSR/MMFAR/BFAR)
+   before halting, instead of doing nothing. One real wrinkle: HardFault
+   runs at the highest configurable exception priority, so the low-priority
+   IRQ `stdio_usb`'s printf normally relies on to actually push bytes out
+   over USB can never preempt us to finish that -- worked around by calling
+   TinyUSB's `tud_task()` directly and repeatedly ourselves instead of
+   waiting for an interrupt that will never come. ⏳ Not yet hardware-tested
+   -- if this really is a hard fault (plausible after six clean loop
+   checks), this should finally show the actual faulting address, which
+   `arm-none-eabi-addr2line -e build/PicoDoom.elf <PC>` (or
+   `PicoDoom.elf.map`) can map straight back to a source line -- no more
+   guessing which function to instrument next. Diagnostics (tic heartbeat,
+   `Z_CheckHeap()`, three step bounds, the `lastopening` checks) all still
+   in place too, in case it's still a loop somewhere none of the six have
+   covered.
+
 ### `<stdint.h>` migration (post-mortem on the ninth bug)
 
 Three real bugs (`d_ticcmd.h`, `spriteframe_t.rotate`, `maptexture_t.masked`)
@@ -690,6 +874,229 @@ straight off a GPIO, no USB) instead of USB Audio Class.
   README. Rewritten to describe PicoDoom: hardware, build/flash
   instructions, controls, current status, pointers to docs/PLAN.md and
   AGENTS.md for detail.
+
+## Demo/gameplay freeze investigation (2026-09, ongoing)
+
+Reproducible silent freeze, first seen during demo autoplay, MAP05
+(`demo1`, skill 3), consistently mid-gameplay — user's own testing suggests
+"close after a barrel exploding and while opening a secret wall," and
+possibly reachable in manual play too, not demo-specific. No crash message,
+no reboot, just a dead board. Long investigation, several rounds of
+hardware-in-the-loop hypothesis testing, most of them negative results:
+
+- Added step-bound guards (`#ifdef PICO`, `I_Error` if exceeded) to every
+  loop that could plausibly spin forever on corrupted data: `P_RunThinkers`
+  (`doom/p_tick.c`), `P_BlockThingsIterator` (`doom/p_maputl.c`),
+  `P_SetMobjState`'s zero-tic state chain (`doom/p_mobj.c`). Also added
+  bounds checks to two genuinely unchecked buffer overflows found along the
+  way (`openings[]` in `doom/r_plane.h`/`r_segs.c`, `intercepts[]` in
+  `doom/p_maputl.c`, the latter's `MAXINTERCEPTS` also raised 128->1024 in
+  `doom/p_local.h`). **None of these ever fired** on the actual freeze.
+- Fixed one genuine bug found along the way: a use-after-free in
+  `P_RunThinkers` (`Z_Free(currentthinker)` then reading
+  `currentthinker->next` through the freed pointer) — real, but confirmed
+  (via freeze-point shift) not the cause of this specific freeze either.
+- Added `src/FaultHandler.cpp`, a real `isr_hardfault` (the SDK's default is
+  a silent `bkpt #0` with no debugger attached — indistinguishable from an
+  infinite loop, which is exactly what this investigation had been
+  chasing). First version tried to force a printf out over USB CDC from
+  fault context by calling `tud_task()` in a loop. **Also produced no
+  output** on a reproducible freeze test.
+- Added 3-second timeouts to the two unbounded cross-core waits in the
+  Phase 4.5/4.6 video pipeline (`I_FinishUpdate`'s wait on
+  `g_blit_buf_free[]` in `src/i_video_ili9486.cpp`; the DMA-completion wait
+  in `Ili9486Display::write_pixels`, `src/Ili9486Display.cpp`) on the theory
+  that core1 stalling (stuck in `tuh_task()`, a wedged DMA/SPI transfer)
+  would hang core0 completely silently, matching the symptom exactly and
+  explaining why nothing DOOM-engine-side was catching it. **Also silent**
+  — freeze reproduced again with neither timeout firing.
+
+Six clean loop-bound results plus a hard-fault handler plus two cross-core
+timeouts, all silent, was strong negative evidence — but not because
+nothing was happening. **The debug probe told the real story** (see
+`debug_notes.md`, three independent GDB captures, all landing on the exact
+same call stack): a genuine hard fault, every time, in `V_DrawPatch`
+(`doom/v_video.c:223`) called with a corrupted `patch` argument
+(`0xffffffff`) and corrupted `x` (`24191`), from `STlib_updateMultIcon`
+(`doom/st_lib.c:237`) for `w_arms[0]` (the status-bar weapon-ownership
+icon), from `ST_drawWidgets` (`doom/st_stuff.c:1078`), from `D_Display`.
+`w_arms` is a plain `static st_multicon_t w_arms[6]` in `st_stuff.c` — not
+zone-heap memory, so this isn't a purge/reuse-after-`Z_ChangeTag` issue, it
+reads as a stray write from somewhere else landing on fixed .bss memory
+(same class of bug as the `openings[]`/`intercepts[]` overflows already
+fixed, just with a static-memory target this time instead of a stack
+buffer) — consistent with the freeze point drifting slightly build to
+build (829→832→831→830→831→831→832): a fixed-size overflow whose visible
+consequence depends on exactly what's adjacent in memory, which shifts as
+the .bss/.data layout shifts with any code change. **Not yet located.**
+
+**And the hard-fault handler wasn't actually failing to catch anything —
+its own recovery path was deadlocking.** `hard_fault_handler_c`'s original
+`tud_task()`-flush loop, called from fault context, re-enters TinyUSB's
+device-stack state machine (queues, spinlock-guarded critical sections
+shared with core1's `tuh_task()` host stack) — state that can legitimately
+be mid-update at the exact instant a fault interrupts normal execution.
+Calling back into it re-entrantly from an asynchronous exception context
+blocked forever on that same lock (see `debug_notes.md`'s
+`critical_section_enter_blocking`/`spin_lock_blocking` frames on both
+cores). So the mechanism built specifically to make faults visible was
+itself hanging silently — indistinguishable from "no fault happened" — and
+actively misled this investigation for a full round of hardware testing.
+
+**Fixed** (`src/FaultHandler.cpp`, rewritten): the handler no longer
+touches USB (or anything else with cross-core/interrupt state) from fault
+context at all. It stashes PC/LR/CFSR in the watchdog's scratch registers
+(`watchdog_hw->scratch[0..3]` — `[4]` is reserved by the SDK's own
+`watchdog_enable()`/`watchdog_reboot()` bookkeeping; survive a watchdog
+reset, unlike ordinary SRAM) and reboots via `watchdog_reboot()`, the same
+mechanism `I_Quit()` already uses successfully. The next boot, in normal
+context with stdio/USB fully initialized (no reentrancy risk), checks those
+scratch registers and prints the stashed fault before starting the game —
+`report_pending_hard_fault()`, called from `src/PicoDoom.cpp`'s `main()`
+right after `stdio_init_all()`. This should surface the exact same crash
+debug_notes.md found, automatically, over plain USB serial, no debug probe
+needed.
+
+Also added a step-bound guard to `Z_CheckHeap()` itself
+(`doom/z_zone.c`) — its block-list walk's only exit condition is reaching
+the sentinel (`block->next == &mainzone->blocklist`); it's been called
+every tic this whole investigation as a corruption *detector* but was
+never itself suspected as a hang candidate, and is the one loop that was
+never given a bound.
+
+**Next step**: reflash, reproduce, read whatever the next boot prints
+(either the stashed hard-fault PC/LR/CFSR — feed PC to
+`arm-none-eabi-addr2line -e build/PicoDoom.elf` to confirm/locate the
+`V_DrawPatch` call site precisely — or the `Z_CheckHeap` cycle-detected
+message, if that's what actually fires instead). From there, find what
+writes past its own buffer and lands on `w_arms`' address — candidates tied
+to the "barrel exploding + secret door" trigger not yet ruled out: sound
+channel management in `s_sound.c` (`S_StartSound`'s channel-search/steal
+logic runs even though the low-level `i_sound_null.c` backend is a no-op —
+many simultaneous sound requests from a chain-reacting explosion could
+stress it in a way nothing before has), or something explosion/radius-
+damage-specific in `p_mobj.c`/`p_enemy.c`. Ruled out: a "secret revealed"
+HUD message buffer overflow — checked, this vanilla 1.10 codebase has no
+such message at all (`p_spec.c`'s `P_SecretFound` only increments
+`secretcount`, doesn't touch `player->message`; that's a Boom/later-port
+feature).
+
+**Correction from the user** (owns the debug probe, actually ran the GDB
+session `debug_notes.md` came from): compiled Debug, the freeze does not
+reproduce at all. Compiled Release or RelWithDebInfo, it does, and from the
+outside it is genuinely just a visual freeze, no crash — the `debug_notes.md`
+captures were taken by manually breaking in with Ctrl+C once the game was
+already frozen (not an automatic break on a fault) and reading both cores'
+call stacks, repeatedly, getting the same picture every time. That the CPU
+lands in the *identical* spot on every independent interrupt (rather than
+different points, as sampling a genuinely still-running program would show)
+is itself good evidence both cores really are stuck, not just slow — this
+part of the read doesn't depend on trusting the deeper, harder-to-verify
+frames. `hard_fault_handler_c`/`V_DrawPatch` appearing above that in the
+unwound stack is not necessarily wrong (a real HardFault entering that
+handler, whose old `tud_task()`-flush loop then deadlocks exactly at
+`osal_queue_receive`/`spin_lock_blocking` — frames #0-3, matching perfectly
+— would *look like* "just a freeze, no crash message" from outside, since
+that old handler's whole flush path never got anywhere near printing
+anything). But it doesn't need to be trusted either: this doesn't change
+what to do next, since the already-shipped fault-handler rewrite settles it
+either way (a report on the next boot confirms a real fault + pinpoints it;
+continued silence confirms a genuine hang with no exception ever taken, and
+redirects investigation onto the cross-core TinyUSB locking itself).
+
+**New, load-bearing clue**: Debug vs. Release is the one axis that actually
+changes the outcome, and this project's `CMakeLists.txt` overrides no
+per-build-type compiler flags at all — so the entire difference is CMake's
+own stock `-O0` (Debug) vs. `-O2`/`-O3 -DNDEBUG` (Release/RelWithDebInfo).
+That an optimizer-only difference flips a memory-corruption bug on and off
+is the textbook signature of a **strict-aliasing violation**: GCC's
+`-fstrict-aliasing` only takes effect (only actually acts on the
+type-based-alias assumptions it licenses, e.g. reordering/eliding loads
+across pointers of different types it assumes cannot overlap) from `-O2`
+up — at `-O0`/`-Og` the same violating code simply happens to still produce
+correct results. This 1993 codebase reinterprets raw WAD lump bytes as
+`patch_t`/other structs via pointer casts constantly — precisely
+`V_DrawPatch`'s whole reason for being — which is exactly the pattern that
+violates strict aliasing, and exactly why most surviving DOOM source ports
+(chocolate-doom included) build with `-fno-strict-aliasing`. **Fixed**:
+added `-fno-strict-aliasing` to every `doom/` engine source's compile
+options in `CMakeLists.txt`, alongside the existing `-std=gnu90`/`-w`. Not
+yet hardware-confirmed — needs a round-trip like everything else this
+round — but well-motivated enough to ship ahead of that confirmation, and
+it composes fine with the fault-handler fix regardless of whether it turns
+out to be the whole story.
+
+### Root cause found (2026-09-12)
+
+The fault-handler rewrite worked exactly as designed: the very next boot
+printed `*** PREVIOUS BOOT ENDED IN A HARD FAULT ***` with PC/LR/CFSR,
+automatically, over plain USB serial, no debug probe needed — and a live
+GDB session (debug probe still attached, breakpoint set directly in
+`hard_fault_handler_c` this time rather than a post-hoc Ctrl+C) independently
+confirmed the identical fault, so this was always a genuine HardFault, not
+a plain hang (see the `hard_fault_handler_c`/`<signal handler called>`
+frames in the previous round's `debug_notes.md` capture too — that read
+turned out to be right after all). `-fno-strict-aliasing` did **not** fix
+it — same crash, same site, ruling that theory out (kept anyway; harmless,
+and still the right thing to build 1993 C against on principle).
+
+CFSR `0x01000000` decodes to UFSR bit 8 (bit 24 of CFSR) = **UNALIGNED** —
+a usage fault from an instruction that unconditionally requires natural
+alignment (LDRD/STRD/LDM-class), not an ordinary bad-address bus fault.
+That's consistent with, not contradictory to, `patch` being the same
+`0xffffffff` seen before: an all-ones address is odd (fails any alignment
+check) as well as almost certainly unmapped, so whichever of the two the
+CPU checks first (alignment, for these instruction classes) is what
+surfaces.
+
+Traced it to a real, confirmed bug, found by inspecting every
+`STlib_initMultIcon()` call site in `doom/st_stuff.c`: every other one
+(`w_faces`, `w_keyboxes[0..2]`) passes a genuine `int*`/`int[]` (`st_faceindex`,
+`keyboxes[]`); only `w_arms[]`'s init passed `(int *) &plyr->weaponowned[i+1]`
+— casting a pointer into `player_t`'s `boolean weaponowned[NUMWEAPONS]`
+array to `int*`, which `STlib_updateMultIcon` then dereferences as a full
+4-byte int to select which patch to draw
+(`V_DrawPatch(mi->x, mi->y, FG, mi->p[*mi->inum])`). Harmless on original
+Linux DOOM, where `boolean` was an int-sized enum — but `doom/doomtype.h`
+makes `boolean` a real 1-byte `bool` for `PICO`/C++ builds (`#if
+defined(__cplusplus) || defined(PICO)`), so this reads 3 bytes *past* the
+single flag it means to read, composing a garbage "icon index" out of
+whichever `weaponowned[]` entries happen to sit next to it (or, for the
+last of the six arm icons, `i+4` reaches index 9 of a 9-entry array —
+genuinely out of bounds, into whatever `player_t` field follows it) — then
+indexes the 2-entry `arms[i][]` patch-pointer array with that garbage
+value, walking off into arbitrary nearby static memory. This explains
+every observed detail: reproducible at specific moments (a weapon-pickup
+event flips one of the relevant bytes from 0, changing the garbage
+composite from a safe small value to a huge one), freeze point drifting
+build to build (the garbage depends on whatever memory happens to be
+adjacent, which shifts with layout), and only manifesting past `-O0` in
+one respect worth noting for later — the bug itself isn't
+optimization-dependent (it's a plain out-of-bounds read, present at any
+optimization level), so Debug not reproducing it is presumably down to
+incidental memory-layout/adjacent-value differences between build types
+rather than this bug needing the optimizer, unlike the aliasing dead end
+above.
+
+**Fixed** (`doom/st_stuff.c`, `#ifdef PICO`): added `static int
+armsowned[6]`, refreshed every tic from `plyr->weaponowned[i+1]` in the
+same place and the same way `keyboxes[]` already is (`ST_updateWidgets`),
+and pointed `w_arms[]`'s `STlib_initMultIcon()` call at `&armsowned[i]`
+instead of the unsafe cast. Non-`PICO` builds keep the original vanilla
+line unchanged. Builds clean, zero warnings.
+
+**✔ Confirmed fixed on hardware (2026-09-12).** Demo autoplay now runs
+through multiple demo sequences across multiple maps with no freeze —
+previously died reliably around gametic 830 on MAP05 every single time.
+Investigation closed.
+
+Kept from this investigation even though they weren't the actual cause:
+the `P_RunThinkers` use-after-free fix, the `openings[]`/`intercepts[]`
+bounds checks (all three are real bugs, just not this one), the
+`Z_CheckHeap()` step-bound guard, the `-fno-strict-aliasing` build flag,
+and — most valuably — the rewritten `FaultHandler.cpp`, which turned "board
+goes silent" into an actual crash report over plain USB serial and is what
+made this whole bug findable without a debug probe.
 
 ## Key engine facts
 

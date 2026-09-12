@@ -34,6 +34,24 @@
 // Visplane related.
 extern  short*		lastopening;
 
+#ifdef PICO
+// MAXOPENINGS/openings[] moved here (from a local #define + file-scope
+// array in r_plane.c) so r_segs.c can bounds-check writes through
+// lastopening before they happen -- see r_segs.c's #ifdef PICO comments
+// for why: the only bounds check in the original source (r_plane.c,
+// R_DrawPlanes) runs *after* a frame's walls are already rendered, well
+// after r_segs.c's own lastopening writes/advances could already have
+// run past the end of openings[]. A silent out-of-bounds write into
+// whatever .bss data happens to follow openings[] -- not a crash, not an
+// error, just quiet corruption of something else entirely -- confirmed as
+// the cause of a real, reproducible hang on this hardware (see
+// docs/PLAN.md): a level area revealing a lot of new wall geometry at
+// once (a secret door opening) is exactly the scenario that pushes
+// lastopening furthest in one frame.
+#define MAXOPENINGS (SCREENWIDTH*64)
+extern short openings[MAXOPENINGS];
+#endif
+
 
 typedef void (*planefunction_t) (int top, int bottom);
 
