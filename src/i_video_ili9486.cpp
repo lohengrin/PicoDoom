@@ -293,6 +293,26 @@ void I_ReadScreen(byte* scr) {
     memcpy(scr, screens[0], SCREENWIDTH * SCREENHEIGHT);
 }
 
+// Live SPI pixel-clock tuning (2026-09 performance work): called from
+// src/i_input_usbhid.cpp's F1/F2 handling so the actual hardware
+// corruption ceiling can be found by hand instead of guessed from a
+// datasheet. delta_hz may be negative; clamped so it can't underflow past a
+// sane floor. pico_toolset::Ili9486::set_pixel_clock_hz() takes effect on
+// the next set_window() call (core1's i_video_core1_step()), not
+// immediately -- see that method's own doc comment on why calling it from
+// core0 here, while core1 runs the blit loop, needs no extra
+// synchronization.
+void i_video_bump_pixel_clock_hz(int32_t delta_hz) {
+    constexpr uint32_t kMinPixelClockHz = 1'000'000;
+    uint32_t cur = g_display.pixel_clock_hz();
+    uint32_t next = (delta_hz < 0 && static_cast<uint32_t>(-delta_hz) >= cur)
+        ? kMinPixelClockHz
+        : static_cast<uint32_t>(static_cast<int64_t>(cur) + delta_hz);
+    g_display.set_pixel_clock_hz(next);
+    printf("PicoDoom: SPI pixel clock requested=%u Hz  last actual=%u Hz\n",
+           static_cast<unsigned>(next), static_cast<unsigned>(g_display.pixel_clock_actual_hz()));
+}
+
 // I_StartTic lives in src/i_input_usbhid.cpp (Phase 3, USB-PIO keyboard).
 void I_StartFrame(void) {}
 

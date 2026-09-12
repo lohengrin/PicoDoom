@@ -25,6 +25,9 @@ extern "C" {
 #include "doomstat.h" // mouseSensitivity, for F10/F11's driver-level adjust below
 }
 
+// src/i_video_ili9486.cpp -- F1/F2 live SPI pixel-clock tuning below.
+extern "C" void i_video_bump_pixel_clock_hz(int32_t delta_hz);
+
 #include "pico/multicore.h"
 
 #include <cstdint>
@@ -91,12 +94,14 @@ const uint8_t* hid_to_doom_key()
         table[0x2B] = KEY_TAB; table[0x2C] = ' ';
         table[0x2D] = KEY_MINUS; table[0x2E] = KEY_EQUALS;
         table[0x36] = ','; table[0x37] = '.'; table[0x38] = '/';
-        table[0x3A] = KEY_F1; table[0x3B] = KEY_F2; table[0x3C] = KEY_F3; table[0x3D] = KEY_F4;
+        table[0x3C] = KEY_F3; table[0x3D] = KEY_F4;
         table[0x3E] = KEY_F5; table[0x3F] = KEY_F6; table[0x40] = KEY_F7; table[0x41] = KEY_F8;
         table[0x42] = KEY_F9;
-        // F10/F11/F12 (0x43-0x45) deliberately NOT mapped here: they're
-        // intercepted directly below for the mouse toggle/sensitivity
-        // controls instead of posted as ordinary DOOM keys -- F10 already
+        // F1/F2 (0x3A/0x3B) and F10/F11/F12 (0x43-0x45) deliberately NOT
+        // mapped here: they're intercepted directly below instead of posted
+        // as ordinary DOOM keys. F1/F2 are live SPI pixel-clock tuning
+        // (2026-09 performance work, temporary -- shadows vanilla DOOM's F1
+        // help screen/F2 save menu while this is in the build); F10 already
         // means "quit DOOM?" and F11 "cycle gamma" in m_menu.c, and posting
         // both meanings for the same physical key would be confusing.
         table[0x48] = KEY_PAUSE;
@@ -133,6 +138,13 @@ bool g_mouse_enabled = true;
 bool g_prev_f10_down = false;
 bool g_prev_f11_down = false;
 bool g_prev_f12_down = false;
+
+// Live SPI pixel-clock tuning (F1 up / F2 down) -- see hid_to_doom_key()'s
+// doc comment. Temporary, for finding this panel/wiring's real corruption
+// ceiling by hand (2026-09 performance work).
+bool g_prev_f1_down = false;
+bool g_prev_f2_down = false;
+constexpr int32_t kPixelClockStepHz = 1'000'000;
 
 void post_key(int doomkey, bool down)
 {
@@ -201,6 +213,22 @@ extern "C" void I_StartTic(void)
     if (alt != g_prev_alt) {
         post_key(KEY_RALT, alt);
         g_prev_alt = alt;
+    }
+
+    // Live SPI pixel-clock tuning (F1 up / F2 down) -- edge-triggered, same
+    // pattern as the mouse controls below. See hid_to_doom_key()'s doc
+    // comment and i_video_bump_pixel_clock_hz()'s (src/i_video_ili9486.cpp).
+    {
+        bool f1_down = g_usb_hid.is_key_down(0x3A);
+        bool f2_down = g_usb_hid.is_key_down(0x3B);
+
+        if (f1_down && !g_prev_f1_down)
+            i_video_bump_pixel_clock_hz(kPixelClockStepHz);
+        if (f2_down && !g_prev_f2_down)
+            i_video_bump_pixel_clock_hz(-kPixelClockStepHz);
+
+        g_prev_f1_down = f1_down;
+        g_prev_f2_down = f2_down;
     }
 
     // Mouse toggle (F12) / sensitivity (F11 up, F10 down) -- edge-triggered
