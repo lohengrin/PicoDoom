@@ -292,7 +292,15 @@ extern "C" void I_StartTic(void)
             constexpr int kStickCenter = 128;
             constexpr int kDeadzone = 40; // out of 128 each direction from center
             int lx = static_cast<int>(pad.lx) - kStickCenter;
-            int ly = static_cast<int>(pad.ly) - kStickCenter;
+            // Inverted from the naive "high pad.ly = down" reading (real-hardware
+            // finding: pushing the stick back/down moved the player forward).
+            // Checked first for the ARM/x86 char-signedness class of bug this
+            // project hit before (docs/PLAN.md) -- ruled out: GamepadState and
+            // this whole path use uint8_t/int16_t throughout, no plain `char`
+            // anywhere. This is a genuine axis-convention mismatch instead --
+            // D-pad up/down are separate button bits, read independently of
+            // pad.ly, which is why they weren't affected.
+            int ly = kStickCenter - static_cast<int>(pad.ly);
             int joyx = (lx > kDeadzone) ? 1 : (lx < -kDeadzone) ? -1 : 0;
             int joyy = (ly > kDeadzone) ? 1 : (ly < -kDeadzone) ? -1 : 0;
             // D-pad overrides the stick when held -- it's inherently digital,
