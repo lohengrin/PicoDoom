@@ -70,9 +70,9 @@
 // convert+DMA (core1), which is known-good at these clock speeds too
 // (measured ~18.7fps).
 #include "pico_toolset/ili9486.h"
-#include "pico_toolset/ili9486_configs.h"
 #include "pico_toolset/psram.h"
 #include "i_video_core1.hpp"
+#include "board_config.hpp"
 
 extern "C" {
 #include "doomdef.h"
@@ -216,7 +216,7 @@ void I_InitGraphics(void) {
         memset(buf, 0, kFramePixels * sizeof(uint16_t));
     }
 
-    g_display.init(pico_toolset::configs::ili9486::kWaveshareRp2350PiZero);
+    g_display.init(picodoom::ili9486_config());
     // Black out the whole panel once, independent of any palette/game state
     // -- confirms the panel is alive and gives a clean border around the
     // centered scaled game viewport that I_FinishUpdate never touches. Runs

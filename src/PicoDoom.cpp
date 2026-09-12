@@ -14,8 +14,8 @@ extern "C" {
 }
 
 #include "pico_toolset/psram.h"
-#include "pico_toolset/psram_configs.h"
 #include "pico_toolset/fault_handler.h"
+#include "board_config.hpp"
 extern "C" bool sd_init(void);
 extern "C" void usb_hid_core1_init(void); // src/i_input_usbhid.cpp
 
@@ -123,8 +123,7 @@ int main(void)
     pico_toolset::report_pending_hard_fault("PicoDoom");
 
     printf("PicoDoom: PSRAM init...\n");
-    pico_toolset::PsramStatus psram =
-        pico_toolset::psram_init(pico_toolset::configs::psram::kWaveshareRp2350PiZero);
+    pico_toolset::PsramStatus psram = pico_toolset::psram_init(picodoom::psram_config());
     if (!psram.present)
         fatal("PSRAM not detected");
     if (!psram.test_ok)
