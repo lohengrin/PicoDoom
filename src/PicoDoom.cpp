@@ -10,10 +10,11 @@ extern "C" {
 #include "m_argv.h"
 }
 
-#include "Psram.hpp"
+#include "pico_toolset/psram.h"
+#include "pico_toolset/psram_configs.h"
+#include "pico_toolset/fault_handler.h"
 #include "PicoUsbKeyboard.hpp"
 extern "C" bool sd_init(void);
-extern "C" void report_pending_hard_fault(void); // src/FaultHandler.cpp
 
 static void fatal(const char* msg)
 {
@@ -35,13 +36,15 @@ int main(void)
 
     // If the previous boot ended in a hard fault, its diagnostic registers
     // were stashed in the watchdog's scratch registers (survive the reset)
-    // instead of being printed from fault context -- see FaultHandler.cpp's
-    // header comment for why. Report it now, first thing, before it's lost
-    // to the next fault (or the next normal reboot).
-    report_pending_hard_fault();
+    // instead of being printed from fault context -- see
+    // pico_toolset/fault_handler.h's header comment for why. Report it now,
+    // first thing, before it's lost to the next fault (or the next normal
+    // reboot).
+    pico_toolset::report_pending_hard_fault("PicoDoom");
 
     printf("PicoDoom: PSRAM init...\n");
-    PsramStatus psram = psram_hw_init();
+    pico_toolset::PsramStatus psram =
+        pico_toolset::psram_init(pico_toolset::configs::psram::kWaveshareRp2350PiZero);
     if (!psram.present)
         fatal("PSRAM not detected");
     if (!psram.test_ok)

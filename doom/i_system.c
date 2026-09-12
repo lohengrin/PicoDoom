@@ -53,7 +53,9 @@ int	mb_used = 6;
 #ifdef PICO
 // Zone heap lives in PSRAM (8 MB on the RP2350-PiZero): an RP2350's ~500 KB
 // SRAM cannot back DOOM's 6 MB default zone. psram_malloc is provided by
-// src/Psram.cpp; psram_hw_init() runs in main() before D_DoomMain().
+// Pico-Toolset's pico_toolset_psram component (third_party/pico-toolset);
+// pico_toolset::psram_init() runs in main() (src/PicoDoom.cpp) before
+// D_DoomMain().
 extern void *psram_malloc (size_t);
 #endif
 

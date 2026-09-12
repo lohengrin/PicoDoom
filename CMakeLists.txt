@@ -14,16 +14,18 @@ endif()
 # ====================================================================================
 cmake_minimum_required(VERSION 3.13)
 
-# Target board: Waveshare RP2350-PiZero. Use our boards/waveshare_rp2350_pizero.h
-# (copied from the validated TOM6809 project) ahead of the SDK's, since it adds
-# PICO_PSRAM_CS_PIN and PICO_DEFAULT_PIO_USB_DP_PIN the SDK's version lacks.
+# Target board: Waveshare RP2350-PiZero. Use Pico-Toolset's shared
+# boards/waveshare_rp2350_pizero.h (this project's own copy, and TOM6809's
+# identical copy, both moved there -- see third_party/pico-toolset's README)
+# ahead of the SDK's, since it adds PICO_PSRAM_CS_PIN and
+# PICO_DEFAULT_PIO_USB_DP_PIN the SDK's version lacks.
 # PICO_BOARD must be defined BEFORE pico_sdk_import.cmake: its
 # pico_pre_load_platform runs at include time and decides the toolchain/platform
 # (rp2350 vs rp2040) from it.
 if(NOT DEFINED PICO_BOARD)
     set(PICO_BOARD waveshare_rp2350_pizero CACHE STRING "Board type" FORCE)
 endif()
-set(PICO_BOARD_HEADER_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/boards CACHE STRING "" FORCE)
+set(PICO_BOARD_HEADER_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/pico-toolset/boards CACHE STRING "" FORCE)
 
 # initialize the SDK based on PICO_SDK_PATH
 # note: this must happen before project()
@@ -38,47 +40,32 @@ set(CMAKE_CXX_STANDARD 20)
 # initialize the Raspberry Pi Pico SDK
 pico_sdk_init()
 
-# pico_fatfs -- FatFs (R0.15) with a Pico SPI/PIO backend for the uSD card.
-# Same repo/config as TOM6809's pizero_lcd profile. PICO_PIO_USE_GPIO_BASE is
-# required on this board: its uSD MISO pin (GPIO40) is >31 and pico_fatfs's
-# generated PIO driver would otherwise silently alias it to GPIO8 (see
-# src/sd_stdio.c). Set as INTERFACE so it reaches hardware_pio too.
-include(FetchContent)
-FetchContent_Declare(
-    pico_fatfs
-    GIT_REPOSITORY https://github.com/elehobica/pico_fatfs.git
-    GIT_TAG main
-)
-FetchContent_MakeAvailable(pico_fatfs)
-target_compile_definitions(pico_fatfs INTERFACE PICO_PIO_USE_GPIO_BASE=1)
-
-# Pico-PIO-USB -- Phase 3 keyboard input (PICO_DEFAULT_PIO_USB_DP_PIN,
-# GPIO28/29, see boards/waveshare_rp2350_pizero.h): RP2350's own USB
-# peripheral is native-device-only and already committed to stdio_usb's
-# serial console, so this is a second, PIO-emulated USB *host* controller,
-# driven by TinyUSB configured as tinyusb_host. Same dependency/config as
-# TOM6809's validated WAVESHARE_USB_HID_SUPPORT profile (src/ui_pico's
-# PicoUsbHidInput) -- ported verbatim below rather than re-derived, since
-# every one of these defines was found the hard way there (see each one's
-# comment) and getting even one wrong either wedges the USB host silently
-# or kills the serial console this whole project has been debugged through.
-#
-# Deliberately NOT pico-sdk's auto-detected tinyusb_pico_pio_usb target
-# (family.cmake's check_and_add_pico_pio_usb_support() runs once during
-# pico_sdk_init() above, before a PICO_PIO_USB_PATH set here could take
-# effect) -- Pico-PIO-USB's own upstream CMakeLists.txt gives a
-# self-contained `pico_pio_usb` INTERFACE library that doesn't need that
-# detection at all; the one piece still needed from TinyUSB itself is the
-# host-controller-driver glue (hcd_pio_usb.c), added as a source below from
-# the vendored tree (PICO_TINYUSB_PATH is set by pico-sdk's own
-# src/rp2_common/tinyusb/CMakeLists.txt during pico_sdk_init()).
-FetchContent_Declare(
-    pico_pio_usb
-    GIT_REPOSITORY https://github.com/sekigon-gonnoc/Pico-PIO-USB.git
-    GIT_TAG main
-)
-FetchContent_MakeAvailable(pico_pio_usb)
-target_compile_definitions(pico_pio_usb INTERFACE PIO_USB_USE_TINYUSB)
+# Pico-Toolset (submodule, third_party/pico-toolset) provides pico_fatfs
+# (uSD/FatFs, with PICO_PIO_USE_GPIO_BASE=1 already set -- this board's uSD
+# MISO pin, GPIO40, is >31 and pico_fatfs's generated PIO driver would
+# otherwise silently alias it to GPIO8) and Pico-PIO-USB/tinyusb_host (this
+# board's PIO-emulated USB *host* controller for keyboard/mouse input,
+# PICO_DEFAULT_PIO_USB_DP_PIN/GPIO28-29 -- RP2350's own USB peripheral is
+# native-device-only and already committed to stdio_usb's serial console).
+# Phase 1: PSRAM, SD card (+ its opt-in POSIX/stdio syscall shim) and the
+# fault handler are consumed via their pico_toolset_* targets below. ILI9486/
+# USB_HID stay ON here because src/Ili9486Display.* and
+# src/PicoUsbKeyboard.*/PicoUsbMouse.* still use their own local copies
+# pending the Phase 2 follow-up, and this project still needs the
+# pico_fatfs/pico_pio_usb/tinyusb_host targets they'd otherwise have set up
+# via the FetchContent blocks this replaces.
+set(PICO_TOOLSET_BUILD_SSD1306 OFF CACHE BOOL "" FORCE)
+set(PICO_TOOLSET_BUILD_XPT2046 OFF CACHE BOOL "" FORCE)
+set(PICO_TOOLSET_BUILD_I2S_AUDIO OFF CACHE BOOL "" FORCE)
+set(PICO_TOOLSET_BUILD_RESET_BUTTONS OFF CACHE BOOL "" FORCE)
+set(PICO_TOOLSET_BUILD_DVI_HDMI OFF CACHE BOOL "" FORCE)
+set(PICO_TOOLSET_BUILD_SCREEN OFF CACHE BOOL "" FORCE)
+# Doom's WAD loader (doom/w_wad.c) seeks around inside files via libc stdio,
+# so this project needs the sdcard component's POSIX syscall shim, not just
+# its whole-file-into-memory list_files()/read_file() API -- see
+# src/sd_stdio.cpp.
+set(PICO_TOOLSET_SDCARD_STDIO ON CACHE BOOL "" FORCE)
+add_subdirectory(third_party/pico-toolset)
 
 SET(DOOMSRC
 doom/doomdef.c
@@ -189,29 +176,45 @@ endforeach()
 # rest of your project
 add_executable(PicoDoom
 src/PicoDoom.cpp
-src/Psram.cpp
-src/sd_stdio.c
+src/sd_stdio.cpp
 src/Ili9486Display.cpp
 src/i_video_ili9486.cpp
 src/PicoUsbKeyboard.cpp
 src/PicoUsbMouse.cpp
 src/i_input_usbhid.cpp
-src/FaultHandler.cpp
-${PICO_TINYUSB_PATH}/src/portable/raspberrypi/pio_usb/hcd_pio_usb.c
 ${DOOMSRC}
 )
 
-# pico_fatfs (uSD/FatFs), hardware_psram (QMI PSRAM), hardware_pio (PIO-SPI
-# base=16 for the uSD), hardware_spi + hardware_dma (ILI9486 LCD over SPI1,
-# DMA-fed pixel pushes), pico_pio_usb + tinyusb_host + pico_multicore
-# (Phase 3 USB-PIO keyboard host on core1, see src/PicoUsbKeyboard.cpp),
-# hardware_watchdog (Phase 5, I_Quit -> watchdog_reboot()), on top of
-# pico_stdlib.
+# pico_toolset_sdcard (uSD/FatFs + POSIX stdio shim), pico_toolset_psram
+# (QMI PSRAM), pico_toolset_fault_handler (hard-fault -> next-boot report),
+# hardware_spi + hardware_dma (ILI9486 LCD over SPI1, DMA-fed pixel pushes,
+# still local -- see src/Ili9486Display.*), pico_pio_usb + tinyusb_host +
+# pico_multicore (Phase 3 USB-PIO keyboard host on core1, still local -- see
+# src/PicoUsbKeyboard.cpp; hcd_pio_usb.c comes in as an INTERFACE source of
+# pico_pio_usb, set up by third_party/pico-toolset/cmake/pico_pio_usb.cmake),
+# hardware_watchdog (doom/i_system.c's I_Quit -> watchdog_reboot()), on top
+# of pico_stdlib.
 target_link_libraries(PicoDoom
     pico_stdlib
-    pico_fatfs
-    hardware_psram
-    hardware_pio
+    # -u,_stat: pico_toolset_sdcard's sdcard_stdio.cpp.o defines
+    # _open/_read/_write/_lseek/_fstat/_stat/_isatty together in one object
+    # file, overriding newlib's weak syscalls. The linker only pulls an
+    # object out of a static archive for a symbol already known to be
+    # undefined at the point it scans that archive -- doom/w_wad.c's
+    # fopen() calls create an early need for _open (pulling the object in),
+    # but newlib's own libg.a only discovers ITS transitive need for _stat
+    # (fopen -> ... -> _stat_r -> _stat) afterwards, once the archive has
+    # already been scanned and won't be revisited: "undefined reference to
+    # _stat" even though it's right there in the archive. Forcing _stat
+    # "undefined" from the start (rather than -Wl,--whole-archive, which
+    # pulls in every object -- colliding with PicoDoom's own copies of
+    # pio.c/spi.c that pico_toolset_sdcard also happens to link) makes the
+    # linker need it, and therefore pull sdcard_stdio.cpp.o in, on the first
+    # and only pass over that archive.
+    -Wl,-u,_stat
+    pico_toolset_sdcard
+    pico_toolset_psram
+    pico_toolset_fault_handler
     hardware_spi
     hardware_dma
     pico_pio_usb
@@ -226,7 +229,11 @@ target_include_directories(PicoDoom PRIVATE
 )
 
 target_compile_definitions(PicoDoom PRIVATE PICO)
-target_compile_definitions(PicoDoom PRIVATE PICO_PIO_USE_GPIO_BASE=1)
+# PICO_PIO_USE_GPIO_BASE=1 no longer needs setting here: pico_toolset_sdcard
+# links pico_fatfs PUBLIC, and third_party/pico-toolset/cmake/pico_fatfs.cmake
+# already sets it as an INTERFACE definition on that target for every
+# consumer (this board's uSD MISO pin, GPIO40, is >31 and pico_fatfs's
+# generated PIO driver would otherwise silently alias it to GPIO8).
 
 # Linking tinyusb_host (above, for the USB-PIO keyboard) flips FOUR separate
 # SDK defaults that only exist to detect "is this app using TinyUSB itself,

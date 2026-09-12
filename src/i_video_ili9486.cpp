@@ -40,7 +40,7 @@
 // from Phase 4.6.1 -- see that buffer's own doc comment) each frame and
 // handing the index to core1, same shape as the original Phase 4.5 design.
 #include "Ili9486Display.hpp"
-#include "Psram.hpp"
+#include "pico_toolset/psram.h"
 #include "i_video_core1.hpp"
 
 extern "C" {
@@ -178,8 +178,8 @@ void report_stats_if_due(uint64_t now_us) {
     struct mallinfo mi = mallinfo();
     size_t sram_total = static_cast<size_t>(&__StackLimit - &__bss_end__);
     size_t sram_used = static_cast<size_t>(mi.uordblks);
-    size_t psram_used = psram_used_bytes();
-    size_t psram_total = psram_status().size_bytes;
+    size_t psram_used = pico_toolset::psram_used_bytes();
+    size_t psram_total = pico_toolset::psram_status().size_bytes;
 
     printf("PicoDoom: SRAM %u/%uKB  PSRAM %u/%uKB  FPS %.1f  "
            "core0-wait %.0f%%  core0-memcpy %.0f%%  core1-convert %.0f%%  core1-dma %.0f%%\n",
@@ -216,7 +216,7 @@ void I_InitGraphics(void) {
     // plain static array (see its doc comment); g_screen_buf[1] is
     // PSRAM-backed, allocated once here, same pattern (and failure handling)
     // as the pre-Phase-4.6 blit buffers.
-    g_screen_buf[1] = static_cast<byte*>(psram_malloc(SCREENWIDTH * SCREENHEIGHT));
+    g_screen_buf[1] = static_cast<byte*>(pico_toolset::psram_malloc(SCREENWIDTH * SCREENHEIGHT));
     if (!g_screen_buf[1])
         // I_Error's signature predates `const` (1993 C) -- cast, not a
         // real mutation.

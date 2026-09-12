@@ -41,6 +41,25 @@ LCD wiring used there (SPI1): SCK=GPIO10, MOSI=GPIO11, MISO=GPIO12 (touch), CS=G
 D/C=GPIO24, RST=GPIO25. Panel uses a 16-bit shift-register protocol with CMD/param bytes
 (0x00 pad), CS pulsed per command, RGB565 big-endian pixel data.
 
+## Pico-Toolset (shared driver submodule)
+
+`third_party/pico-toolset` (git submodule, `github.com/lohengrin/Pico-Toolset`) holds
+reusable RP2040/RP2350 drivers extracted from this project, TOM6809, and PiCoMonitor,
+built as independent CMake components (`pico_toolset_<name>` targets, gated by
+top-level `PICO_TOOLSET_BUILD_<NAME>` options set in this project's `CMakeLists.txt`).
+Phase 1 (done) moved PSRAM, the SD card mount + POSIX/stdio syscalls, the hard-fault
+handler, and the shared board header onto it — see `pico_toolset_psram`/
+`pico_toolset_sdcard`/`pico_toolset_fault_handler` and their headers under
+`third_party/pico-toolset/components/`/`libs/`. **Phase 2 (not yet done)** will move
+`src/Ili9486Display.*` and `src/PicoUsbKeyboard.*`/`src/PicoUsbMouse.*` onto
+`pico_toolset_ili9486`/`pico_toolset_usb_hid` too — deferred because those adapters
+(`src/i_video_ili9486.cpp`'s chunked core1 blit state machine, `src/i_input_usbhid.cpp`'s
+core1/`tuh_task()` interleaving) encode tuned, hardware-verified timing behavior that
+needs a real flash-and-test pass, not just a clean compile, before landing. When
+extending or fixing a driver PicoDoom uses via the submodule, prefer fixing/extending
+it in Pico-Toolset (then bumping the submodule pin) over patching a local fork — that's
+the whole point of sharing it with TOM6809.
+
 ## Build & firmware
 
 ```bash
@@ -56,13 +75,17 @@ cmake --build build -j$(nproc)   # → build/PicoDoom.uf2
   `2.0.0`/`2.2.0`/`2.3.0` under `~/.pico-sdk/sdk/`).
 - `PICO_BOARD`/`PICO_BOARD_HEADER_DIRS` are set in `CMakeLists.txt` **before**
   `pico_sdk_import.cmake` (its `pico_pre_load_platform`, which decides rp2040 vs rp2350
-  and the toolchain, runs at include time). `PICO_BOARD_HEADER_DIRS` points at this
-  repo's `boards/`, and our `waveshare_rp2350_pizero.h` (copied from TOM6809) takes
-  precedence over the SDK's — it adds `PICO_PSRAM_CS_PIN` (47) and PIO-USB D+/D− pins
-  the SDK's version lacks.
-- `pico_fatfs` is pulled in via FetchContent (same repo as TOM6809) and built with
-  `PICO_PIO_USE_GPIO_BASE=1` INTERFACE (needed because the uSD MISO pin is GPIO40 > 31;
-  without it the PIO-SPI driver addresses GPIO8 as GPIO40 and the mount hangs).
+  and the toolchain, runs at include time). `PICO_BOARD_HEADER_DIRS` points at
+  `third_party/pico-toolset/boards/` (a git submodule, shared with TOM6809 — see
+  "Pico-Toolset" below), whose `waveshare_rp2350_pizero.h` takes precedence over the
+  SDK's — it adds `PICO_PSRAM_CS_PIN` (47) and PIO-USB D+/D− pins the SDK's version
+  lacks.
+- `pico_fatfs` and Pico-PIO-USB/`tinyusb_host` come from Pico-Toolset's
+  `add_subdirectory(third_party/pico-toolset)` (its `cmake/pico_fatfs.cmake`/
+  `cmake/pico_pio_usb.cmake`), not this project's own `FetchContent` blocks anymore.
+  `pico_fatfs` is built with `PICO_PIO_USE_GPIO_BASE=1` INTERFACE there (needed because
+  the uSD MISO pin is GPIO40 > 31; without it the PIO-SPI driver addresses GPIO8 as
+  GPIO40 and the mount hangs).
 - `target_compile_definitions(PicoDoom PRIVATE PICO)` is what activates the `#ifdef PICO`
   block in `doom/d_main.c` / `doom/i_system.c`.
 - Engine is 1993-era C: it only compiles under `-std=gnu90`. The Pico SDK headers need
@@ -173,18 +196,21 @@ LCD driver.
 
 - `I_GetHeapSize`/`I_ZoneBase` in `doom/i_system.c` default to **6 MB** (`mb_used=6`) — far
   over the RP2350 SRAM. Under `#ifdef PICO`, `I_ZoneBase` now allocates from PSRAM via
-  `psram_malloc` (`src/Psram.cpp` + `hardware_psram` QMI, XIP 0x1100_0000, zone = 6 MB).
+  `psram_malloc` (Pico-Toolset's `pico_toolset_psram` component, `hardware_psram` QMI,
+  XIP 0x1100_0000, zone = 6 MB — see "Pico-Toolset" above).
 - total RAM ≈ 520 KB SRAM + 8 MB PSRAM.
 
 ## WAD / filesystem
 
 - `w_wad.c`, `m_misc.c`, `d_main.c` use heavy `fopen/fread/fseek/access` on the host OS.
-  Since Phase 1 the classic Linux syscalls are shimmed onto FatFs by `src/sd_stdio.c`:
-  it mounts the uSD over PIO-SPI (GPIO30/31/40/43 incl. `PICO_PIO_USE_GPIO_BASE=1` for
-  MISO>31) and provides strong `_open/_read/_write/_lseek/_close/_fstat/_stat/_isatty`
-  (+ `_gettimeofday`/`usleep`) that newlib's weak stubs defer to — so
-  `fopen`/`read`/`access` hit the FAT filesystem; console fds 0/1/2 pass to pico_stdio.
-  The engine itself is untouched.
+  Since Phase 1 the classic Linux syscalls are shimmed onto FatFs by Pico-Toolset's
+  `pico_toolset_sdcard` component (`PICO_TOOLSET_SDCARD_STDIO=ON`, see "Pico-Toolset"
+  above): it provides strong `_open/_read/_write/_lseek/_close/_fstat/_stat/_isatty`
+  that newlib's weak stubs defer to, so `fopen`/`read`/`access` hit the FAT filesystem;
+  console fds 0/1/2 pass to pico_stdio. `src/sd_stdio.cpp` just mounts the card
+  (`pico_toolset::SdCard::init()`, PIO-SPI GPIO30/31/40/43 incl.
+  `PICO_PIO_USE_GPIO_BASE=1` for MISO>31) and carries `_gettimeofday`/`usleep`. The
+  engine itself is untouched.
 - If a canonical wad (`doom1.wad`/`doom.wad`/…) sits on the SD root, `IdentifyVersion`
   finds it via `access()`. `src/PicoDoom.cpp` still seeds `myargc=1/myargv`.
 
@@ -221,23 +247,24 @@ LCD driver.
 ## Project layout (current)
 
 ```
-CMakeLists.txt        # PicoDoom target; DOOMSRC list; pico_fatfs FetchContent; board vars
+CMakeLists.txt        # PicoDoom target; DOOMSRC list; Pico-Toolset add_subdirectory; board vars
 src/PicoDoom.cpp      # bare-metal main(): PSRAM init → sd_init() → D_DoomMain()
-src/Psram.cpp/.hpp    # hardware_psram driver + psram_malloc/free (zone heap), free-list allocator
-src/sd_stdio.c        # uSD mount (pico_fatfs PIO-SPI) + newlib syscall shim (_open/_read/…)
-src/Ili9486Display.cpp/.hpp  # low-level ILI9486/SPI1 driver, ported from TOM6809
+src/sd_stdio.cpp       # uSD mount (pico_toolset::SdCard) + _gettimeofday/usleep
+                        # (POSIX stdio syscalls themselves now live in pico_toolset_sdcard)
+src/Ili9486Display.cpp/.hpp  # low-level ILI9486/SPI1 driver, ported from TOM6809 (Phase 2
+                              # follow-up: move onto pico_toolset_ili9486, see "Pico-Toolset" above)
 src/i_video_ili9486.cpp      # DOOM i_video.h impl: screens[0] ping-ponged (SRAM) -> core1 -> LUT -> LCD
 src/i_video_core1.hpp        # i_video_core1_step(): one row of pending blit work, called from core1
-src/PicoUsbKeyboard.cpp/.hpp # USB-PIO HID keyboard host on core1 (Phase 3); owns the
+src/PicoUsbKeyboard.cpp/.hpp # USB-PIO HID keyboard host on core1 (Phase 3; Phase 2
+                              # follow-up: move onto pico_toolset_usb_hid); owns the
                               # shared tuh_hid_*_cb callbacks (TinyUSB allows only one each);
                               # core1_entry()'s loop also drives i_video_core1_step() (Phase 4.5)
 src/PicoUsbMouse.cpp/.hpp    # USB HID mouse (Phase 3), dispatched from PicoUsbKeyboard's callbacks
 src/i_input_usbhid.cpp       # I_StartTic: HID reports -> DOOM event_t/D_PostEvent
 src/tusb_config.h            # TinyUSB config: device (stdio_usb) + host (keyboard)
-src/FaultHandler.cpp         # isr_hardfault override: stashes PC/LR/CFSR in watchdog
-                              # scratch regs + reboots (SDK default is a silent bkpt #0);
-                              # PicoDoom.cpp's main() reports it on the next boot
-boards/               # waveshare_rp2350_pizero.h (adds PSRAM CS + PIO-USB pins)
+third_party/pico-toolset/    # git submodule: shared PSRAM/SD-card/fault-handler/board-header
+                              # drivers (see "Pico-Toolset" above) -- pico_toolset_psram,
+                              # pico_toolset_sdcard, pico_toolset_fault_handler, boards/
 doom/                 # upstream DOOM 1.10 + null i_* stubs + PICO guards
 doom/i_sound_null.c   # sound stub
 doom/i_net_null.c     # net stub
