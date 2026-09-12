@@ -260,11 +260,15 @@ src/sd_stdio.cpp       # uSD mount (pico_toolset::SdCard) + _gettimeofday/usleep
 src/i_video_ili9486.cpp      # DOOM i_video.h impl: screens[0] ping-ponged (SRAM) -> core1 -> LUT ->
                               # pico_toolset::Ili9486 (LCD driver itself now in Pico-Toolset, Phase 2)
 src/i_video_core1.hpp        # i_video_core1_step(): one row of pending blit work, called from core1
-src/i_input_usbhid.cpp       # pico_toolset::UsbHidHost keyboard/mouse host; owns core1 (launches it,
-                              # then init()s the host stack from inside core1_entry() with
-                              # run_on_core1=false, since Pico-PIO-USB's IRQ binds to whichever core
-                              # calls tuh_init() -- see file header); I_StartTic: HID state -> DOOM
-                              # event_t/D_PostEvent; core1_entry()'s loop also drives
+src/i_input_usbhid.cpp       # pico_toolset::UsbHidHost keyboard/mouse/gamepad host; owns core1
+                              # (launches it, then init()s the host stack from inside core1_entry()
+                              # with run_on_core1=false, since Pico-PIO-USB's IRQ binds to whichever
+                              # core calls tuh_init() -- see file header); I_StartTic: HID state ->
+                              # DOOM event_t (ev_keydown/up, ev_mouse, ev_joystick)/D_PostEvent --
+                              # doom/g_game.c and doom/m_menu.c already have full native joystick
+                              # support (gamepad_state(0)'s A/B/X/Y -> fire/strafe/run/use, left
+                              # stick+D-pad -> turn/move, menu navigation all pre-existing 1993 code,
+                              # just never fed real input before); core1_entry()'s loop also drives
                               # i_video_core1_step() (Phase 4.5, kept from the old PicoUsbKeyboard.cpp)
 third_party/pico-toolset/    # git submodule: shared PSRAM/SD-card/fault-handler/board-header/
                               # ILI9486/USB-HID drivers (see "Pico-Toolset" above) -- pico_toolset_psram,

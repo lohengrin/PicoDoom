@@ -118,6 +118,10 @@ bool g_prev_alt = false;
 bool g_prev_connected = false;
 bool g_prev_mouse_connected = false;
 uint8_t g_prev_mouse_buttons = 0;
+bool g_prev_gamepad_connected = false;
+uint8_t g_prev_joy_buttons = 0;
+int g_prev_joy_x = 0;
+int g_prev_joy_y = 0;
 
 // Mouse on/off + sensitivity controls (F12/F11/F10) -- intercepted here
 // rather than posted as ordinary DOOM keys, see hid_to_doom_key()'s doc
@@ -266,6 +270,55 @@ extern "C" void I_StartTic(void)
                 ev.data3 = dy;
                 D_PostEvent(&ev);
                 g_prev_mouse_buttons = buttons;
+            }
+        }
+    }
+
+    {
+        pico_toolset::GamepadState pad = g_usb_hid.gamepad_state(0);
+        if (pad.present != g_prev_gamepad_connected) {
+            printf("PicoDoom: USB gamepad %s\n", pad.present ? "connected" : "disconnected");
+            g_prev_gamepad_connected = pad.present;
+        }
+
+        if (pad.present) {
+            // doom/d_event.h's ev_joystick: data1 bits 0-3 = joyarray[0..3]
+            // (doom/g_game.c's joybuttons[], mapped via joyb_fire/joyb_strafe/
+            // joyb_speed/joyb_use -- default indices 0/1/2/3, doom/m_misc.c),
+            // data2/data3 = x/y. G_Responder/G_BuildTiccmd (and m_menu.c's
+            // menu navigation) only ever compare these to 0 (joyxmove < 0 /
+            // > 0) -- no magnitude, so a plain -1/0/1 sign is both correct
+            // and sufficient; no analog turning-speed curve to tune here.
+            constexpr int kStickCenter = 128;
+            constexpr int kDeadzone = 40; // out of 128 each direction from center
+            int lx = static_cast<int>(pad.lx) - kStickCenter;
+            int ly = static_cast<int>(pad.ly) - kStickCenter;
+            int joyx = (lx > kDeadzone) ? 1 : (lx < -kDeadzone) ? -1 : 0;
+            int joyy = (ly > kDeadzone) ? 1 : (ly < -kDeadzone) ? -1 : 0;
+            // D-pad overrides the stick when held -- it's inherently digital,
+            // no deadzone judgment call needed.
+            if (pad.down(pico_toolset::kBtLeft)) joyx = -1;
+            else if (pad.down(pico_toolset::kBtRight)) joyx = 1;
+            if (pad.down(pico_toolset::kBtUp)) joyy = -1;
+            else if (pad.down(pico_toolset::kBtDown)) joyy = 1;
+
+            // A/B/X/Y -> fire/strafe/run/use, matching m_misc.c's default
+            // joyb_fire=0/joyb_strafe=1/joyb_speed=2/joyb_use=3 bindings.
+            uint8_t buttons = static_cast<uint8_t>((pad.down(pico_toolset::kBtA) ? 1 : 0) |
+                                                    (pad.down(pico_toolset::kBtB) ? 2 : 0) |
+                                                    (pad.down(pico_toolset::kBtX) ? 4 : 0) |
+                                                    (pad.down(pico_toolset::kBtY) ? 8 : 0));
+
+            if (buttons != g_prev_joy_buttons || joyx != g_prev_joy_x || joyy != g_prev_joy_y) {
+                event_t ev;
+                ev.type = ev_joystick;
+                ev.data1 = buttons;
+                ev.data2 = joyx;
+                ev.data3 = joyy;
+                D_PostEvent(&ev);
+                g_prev_joy_buttons = buttons;
+                g_prev_joy_x = joyx;
+                g_prev_joy_y = joyy;
             }
         }
     }
