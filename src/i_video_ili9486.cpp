@@ -235,6 +235,12 @@ void I_InitGraphics(void) {
     // I_FinishUpdate() -- the one and only time core0 touches g_display;
     // every call after this is from core1 (i_video_core1_step()).
     g_display.fill_solid(0);
+    // Boot-time clock report (see PicoDoom.cpp's clk_sys/clk_peri/flash line
+    // above) -- fill_solid() already called set_window() at least once, so
+    // pixel_clock_actual_hz() reflects the real applied rate, not just the
+    // static config's request.
+    printf("PicoDoom: SPI pixel clock requested=%u Hz  actual=%u Hz\n",
+           (unsigned)g_display.pixel_clock_hz(), (unsigned)g_display.pixel_clock_actual_hz());
 }
 
 void I_ShutdownGraphics(void) {}

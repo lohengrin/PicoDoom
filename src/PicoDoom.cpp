@@ -6,6 +6,7 @@
 #include "pico/stdlib.h"
 #include "hardware/clocks.h"
 #include "hardware/vreg.h"
+#include "hardware/structs/qmi.h"
 
 extern "C" {
 #include "d_main.h"
@@ -27,6 +28,31 @@ static void fatal(const char* msg)
 
 int main(void)
 {
+    // Flash's own QMI (M0) clock divider (CLKDIV) is a FIXED register value
+    // set once by boot2 for the chip's ORIGINAL ~150MHz clk_sys --
+    // boot_stage2/boot2_w25q080.S:45's PICO_FLASH_SPI_CLKDIV=2, i.e. flash
+    // SPI clock = clk_sys/2 = ~75MHz at boot. Unlike clk_peri (which needs
+    // explicit re-sourcing to follow clk_sys at all -- see below), flash's
+    // QMI computes its SPI clock as clk_sys/CLKDIV directly with no
+    // separate clock-tree source, so raising clk_sys to 200MHz WITHOUT
+    // touching this divisor would silently raise the physical flash SPI
+    // clock too, to 100MHz -- entirely unvalidated on this hardware, unlike
+    // every other clock change this session (PSRAM/SPI display), and far
+    // riskier since ALL code except explicitly RAM-placed functions
+    // executes via XIP from this same flash: a misread instruction fails
+    // very differently (and worse) than a corrupted pixel. RP2350's own
+    // QMI_M0_TIMING_CLKDIV register docs explicitly warn about exactly this
+    // ordering: "If software is increasing CLKDIV in anticipation of an
+    // increase [in clk_sys], the increase must be applied before the
+    // clk_sys increase" -- so bump it here, first, safe to do on-the-fly
+    // per those same docs (unlike the other M0 timing fields, which need
+    // the QMI idle). Divisor 3 (not boot2's 2) keeps flash at 200/3 =
+    // 66.67MHz once clk_sys rises below, i.e. BELOW the 75MHz it already
+    // proved stable at, rather than blindly exceeding it.
+    hw_write_masked(&qmi_hw->m[0].timing,
+                     3u << QMI_M0_TIMING_CLKDIV_LSB,
+                     QMI_M0_TIMING_CLKDIV_BITS);
+
     // Overclock clk_sys from the RP2350 default 150MHz to 200MHz (2026-09
     // performance work): lets PSRAM's QMI clock hit exactly 100MHz at
     // divisor=2 (clk_sys/2 -- see psram_configs.h, whose max_clock_hz=75MHz
@@ -72,6 +98,22 @@ int main(void)
 
     printf("PicoDoom boot\n");
 
+    // Boot-time clock report (2026-09 performance work): every clock/divisor
+    // touched above, printed once so a hardware regression (or the next
+    // round of tuning) can always be checked against what's actually
+    // running, not just what the source says it should be. PSRAM's and the
+    // SPI pixel clock's achieved rates print further down, right after
+    // their own init (psram_init() below; I_InitGraphics(),
+    // src/i_video_ili9486.cpp, deep inside D_DoomMain()) since neither is
+    // known until then.
+    {
+        uint32_t flash_clkdiv = (qmi_hw->m[0].timing & QMI_M0_TIMING_CLKDIV_BITS) >> QMI_M0_TIMING_CLKDIV_LSB;
+        uint32_t sys_hz = clock_get_hz(clk_sys);
+        printf("PicoDoom: clk_sys=%u Hz  clk_peri=%u Hz  flash CLKDIV=%u (flash SPI=%u Hz)\n",
+               (unsigned)sys_hz, (unsigned)clock_get_hz(clk_peri),
+               (unsigned)flash_clkdiv, (unsigned)(sys_hz / flash_clkdiv));
+    }
+
     // If the previous boot ended in a hard fault, its diagnostic registers
     // were stashed in the watchdog's scratch registers (survive the reset)
     // instead of being printed from fault context -- see
@@ -87,7 +129,8 @@ int main(void)
         fatal("PSRAM not detected");
     if (!psram.test_ok)
         fatal("PSRAM detected but self-test failed");
-    printf("PicoDoom: PSRAM OK (%u KB)\n", (unsigned)(psram.size_bytes / 1024));
+    printf("PicoDoom: PSRAM OK (%u KB, clock=%u Hz)\n",
+           (unsigned)(psram.size_bytes / 1024), (unsigned)psram.clock_hz);
 
     printf("PicoDoom: uSD mount...\n");
     if (!sd_init())
