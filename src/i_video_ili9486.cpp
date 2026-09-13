@@ -70,6 +70,7 @@
 // convert+DMA (core1), which is known-good at these clock speeds too
 // (measured ~18.7fps).
 #include "pico_toolset/ili9486.h"
+#include "pico_toolset/display_panel.h"
 #include "pico_toolset/psram.h"
 #include "i_video_core1.hpp"
 #include "board_config.hpp"
@@ -98,6 +99,17 @@ extern "C" char __bss_end__;
 
 namespace {
 pico_toolset::Ili9486 g_display;
+// Routes every call this file makes that's part of the shared
+// pico_toolset::DisplayPanel contract (set_window/write_pixels/
+// start_pixels_dma/pixels_busy/finish_pixels_dma/end_write/fill_solid)
+// through the interface type instead of the concrete Ili9486 -- so a future
+// board using a different DisplayPanel (e.g. St7789) only needs g_display's
+// declaration/init() call and the ILI9486-specific pixel-clock-tuning calls
+// below changed, not this file's render loop. init()/pixel_clock_hz()/
+// set_pixel_clock_hz()/pixel_clock_actual_hz() stay on the concrete
+// g_display -- config types and clock tuning are driver-specific, not part
+// of DisplayPanel by design.
+pico_toolset::DisplayPanel& g_panel = g_display;
 uint16_t g_rgb565_wire_lut[256];
 
 constexpr int kDstWidth = SCREENWIDTH;   // 320, 1:1 -- see file header
@@ -223,7 +235,7 @@ void I_InitGraphics(void) {
     // here on core0, synchronously, before D_DoomMain() ever calls
     // I_FinishUpdate() -- the one and only time core0 touches g_display;
     // every call after this is from core1 (i_video_core1_step()).
-    g_display.fill_solid(0);
+    g_panel.fill_solid(0);
     // Boot-time clock report (see PicoDoom.cpp's clk_sys/clk_peri/flash line
     // above) -- fill_solid() already called set_window() at least once, so
     // pixel_clock_actual_hz() reflects the real applied rate, not just the
@@ -340,10 +352,10 @@ void i_video_core1_step() {
         if (!multicore_fifo_rvalid())
             return;
         g_blit_idx = static_cast<int>(multicore_fifo_pop_blocking());
-        g_display.set_window(kOffsetX, kOffsetY,
-                              kOffsetX + kDstWidth - 1, kOffsetY + kDstHeight - 1);
+        g_panel.set_window(kOffsetX, kOffsetY,
+                            kOffsetX + kDstWidth - 1, kOffsetY + kDstHeight - 1);
         g_dma_start_us = time_us_64();
-        g_display.start_pixels_dma(std::span<const uint16_t>(g_screen_buf[g_blit_idx], kFramePixels));
+        g_panel.start_pixels_dma(std::span<const uint16_t>(g_screen_buf[g_blit_idx], kFramePixels));
         g_blit_state = BlitState::Transferring;
         return;
     }
@@ -351,12 +363,12 @@ void i_video_core1_step() {
     // Transferring: don't block here -- return immediately if the DMA is
     // still running so the caller's loop gets back to tuh_task() before
     // checking again next iteration.
-    if (g_display.pixels_busy())
+    if (g_panel.pixels_busy())
         return;
 
-    g_display.finish_pixels_dma();
+    g_panel.finish_pixels_dma();
     g_core1_dma_us_accum += time_us_64() - g_dma_start_us;
-    g_display.end_write();
+    g_panel.end_write();
     // Release last: only after set_window/DMA/finish/end_write are all done
     // does core0 get to write this buffer's next frame.
     g_blit_buf_free[g_blit_idx] = true;
