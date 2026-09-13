@@ -50,6 +50,41 @@ rcsid[] = "$Id: w_wad.c,v 1.5 1997/02/03 16:47:57 b1 Exp $";
 #endif
 #include "w_wad.h"
 
+#ifdef PICO
+// This target's ~512KB SRAM has only ~170KB free after DOOM's static
+// tables (same reasoning as doom/i_system.c's I_ZoneBase/I_AllocLow
+// PSRAM-backing comment) -- the WAD directory buffer (W_AddFile/W_Reload's
+// fileinfo_heap, tens of KB for a canonical IWAD) and the permanent
+// lumpinfo/lumpcache tables below are exactly the kind of large, long-lived
+// allocation that budget can't absorb alongside a video driver's own SRAM
+// needs (confirmed on real hardware: an HDMI video driver's SRAM
+// framebuffer left too little heap for these, and this one malloc(%d)
+// failure -- W_AddFile's own error message below -- was the first to hit
+// it). PSRAM (8MB) has no such pressure, so these move there instead,
+// exactly like the zone heap and (formerly) the LCD driver's screen
+// buffers already do. Forward-declared rather than #include
+// "pico_toolset/psram.h" (C++-only, <memory_resource> etc.) -- same
+// pattern doom/i_system.c already uses for psram_malloc.
+extern void *psram_malloc (size_t);
+extern void psram_free (void*);
+
+// realloc() equivalent for PSRAM: no psram_realloc exists (psram_malloc's
+// pool has no free-list compaction to grow a block in place), so this
+// allocates fresh, copies over the old content, and frees the old block --
+// lumpinfo's one realloc-growth site below needs this; ptr==NULL/old_size==0
+// (the very first call) degenerates to a plain allocation, matching
+// realloc(NULL, size)'s own semantics.
+static void* w_psram_realloc (void* ptr, size_t old_size, size_t new_size)
+{
+    void* new_ptr = psram_malloc (new_size);
+    if (new_ptr && ptr && old_size)
+	memcpy (new_ptr, ptr, old_size < new_size ? old_size : new_size);
+    if (ptr)
+	psram_free (ptr);
+    return new_ptr;
+}
+#endif
+
 
 
 
@@ -206,8 +241,9 @@ void W_AddFile (char *filename)
 #ifdef PICO
 	// alloca() here would blow this target's ~2 KB stack for any
 	// canonical IWAD's few-thousand-entry directory (tens of KB) --
-	// heap it instead, freed below once the directory is copied out.
-	fileinfo = fileinfo_heap = malloc (length);
+	// PSRAM-heaped instead (see this file's own psram_malloc comment
+	// above), freed below once the directory is copied out.
+	fileinfo = fileinfo_heap = psram_malloc (length);
 	if (!fileinfo)
 	    I_Error ("W_AddFile: malloc(%d) for wad directory failed", length);
 #else
@@ -218,9 +254,13 @@ void W_AddFile (char *filename)
 	numlumps += header.numlumps;
     }
 
-    
+
     // Fill in lumpinfo
+#ifdef PICO
+    lumpinfo = w_psram_realloc (lumpinfo, startlump*sizeof(lumpinfo_t), numlumps*sizeof(lumpinfo_t));
+#else
     lumpinfo = realloc (lumpinfo, numlumps*sizeof(lumpinfo_t));
+#endif
 
     if (!lumpinfo)
 	I_Error ("Couldn't realloc lumpinfo");
@@ -242,7 +282,7 @@ void W_AddFile (char *filename)
 
 #ifdef PICO
     if (fileinfo_heap)
-	free (fileinfo_heap);
+	psram_free (fileinfo_heap);
 #endif
 }
 
@@ -279,7 +319,7 @@ void W_Reload (void)
     length = lumpcount*sizeof(filelump_t);
 #ifdef PICO
     // See W_AddFile: alloca() here would blow this target's tiny stack.
-    fileinfo = fileinfo_heap = malloc (length);
+    fileinfo = fileinfo_heap = psram_malloc (length);
     if (!fileinfo)
 	I_Error ("W_Reload: malloc(%d) for wad directory failed", length);
 #else
@@ -305,7 +345,7 @@ void W_Reload (void)
     close (handle);
 
 #ifdef PICO
-    free (fileinfo_heap);
+    psram_free (fileinfo_heap);
 #endif
 }
 
@@ -331,19 +371,28 @@ void W_InitMultipleFiles (char** filenames)
     // open all the files, load headers, and count lumps
     numlumps = 0;
 
-    // will be realloced as lumps are added
-    lumpinfo = malloc(1);	
+    // will be realloced (PSRAM-backed under PICO, see this file's own
+    // psram_malloc comment above) as lumps are added
+#ifdef PICO
+    lumpinfo = psram_malloc(1);
+#else
+    lumpinfo = malloc(1);
+#endif
 
     for ( ; *filenames ; filenames++)
 	W_AddFile (*filenames);
 
     if (!numlumps)
 	I_Error ("W_InitFiles: no files found");
-    
+
     // set up caching
     size = numlumps * sizeof(*lumpcache);
+#ifdef PICO
+    lumpcache = psram_malloc (size);
+#else
     lumpcache = malloc (size);
-    
+#endif
+
     if (!lumpcache)
 	I_Error ("Couldn't allocate lumpcache");
 

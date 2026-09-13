@@ -1,14 +1,28 @@
 // USB HID keyboard/mouse input via Pico-Toolset's pico_toolset_usb_hid
-// (PIO-USB TinyUSB host). Also owns core1: this stack's SOF-timer IRQ binds
-// to whichever core calls tuh_init(), so init() happens from inside
-// core1_entry() (via UsbHidHost::init() with run_on_core1=false --
-// kWaveshareRp2350PiZeroLcdManualCore1 -- rather than letting init() spawn
-// and own core1 itself), letting this same core1 loop also drive
+// (PIO-USB TinyUSB host).
+//
+// LCD build (default, !PICODOOM_HDMI): also owns core1 -- this stack's
+// SOF-timer IRQ binds to whichever core calls tuh_init(), so init() happens
+// from inside core1_entry() (via UsbHidHost::init() with run_on_core1=false
+// -- kWaveshareRp2350PiZeroLcdManualCore1 -- rather than letting init()
+// spawn and own core1 itself), letting this same core1 loop also drive
 // i_video_core1_step() (the ILI9486 chunked blit, src/i_video_ili9486.cpp)
 // interleaved with tuh_task() -- see i_video_core1.hpp for why that
 // interleaving (not one blocking per-frame blit call) matters: Pico-PIO-USB's
 // software-timed bus servicing would otherwise starve for the ~41ms a full
 // frame's SPI feed takes.
+//
+// HDMI build (PICODOOM_HDMI): core1 belongs exclusively to
+// src/i_video_dvi.cpp's DVI encode loop -- libdvi's per-scanline DMA IRQ
+// has zero scheduling slack and cannot share a core with Pico-PIO-USB's
+// 1ms SOF-timer IRQ (confirmed on real hardware in TOM6809: no picture at
+// all when shared). So the USB host stack runs on core0 instead, using the
+// toolset's real-hardware-validated kWaveshareRp2350PiZeroHdmi preset
+// (run_on_core1=false, its own PIO instance) -- init() happens once from
+// src/PicoDoom.cpp's main() (before D_DoomMain(), same as the LCD build's
+// core1 launch), and UsbHidHost::task() is polled once per tic from
+// I_StartTic() below, which already runs exactly once per tic with no
+// engine restructuring needed.
 //
 // I_StartTic (doom/i_system.h) polls the resulting keyboard/mouse state and
 // posts DOOM ev_keydown/ev_keyup/ev_mouse events for whatever changed since
@@ -16,7 +30,9 @@
 // interface, same bridging pattern as src/i_video_ili9486.cpp.
 #include "pico_toolset/usb_hid_host.h"
 #include "pico_toolset/usb_hid_configs.h"
+#ifndef PICODOOM_HDMI
 #include "i_video_core1.hpp"
+#endif
 
 extern "C" {
 #include "doomdef.h"
@@ -25,8 +41,12 @@ extern "C" {
 #include "doomstat.h" // mouseSensitivity, for F10/F11's driver-level adjust below
 }
 
+#ifndef PICODOOM_HDMI
 // src/i_video_ili9486.cpp -- F1/F2 live SPI pixel-clock tuning below.
+// DVI has no adjustable pixel clock, so this (and its F1/F2 call sites)
+// only exist in the LCD build.
 extern "C" void i_video_bump_pixel_clock_hz(int32_t delta_hz);
+#endif
 
 #include "pico/multicore.h"
 
@@ -37,6 +57,7 @@ namespace {
 
 pico_toolset::UsbHidHost g_usb_hid;
 
+#ifndef PICODOOM_HDMI
 // core1's stack -- deliberately not the default multicore_launch_core1()
 // mechanism, which reserves PICO_CORE1_STACK_SIZE out of the tiny, fixed
 // SCRATCH_X SRAM bank (a couple KB at most -- too small for the TinyUSB host
@@ -60,6 +81,7 @@ void core1_entry()
         i_video_core1_step();
     }
 }
+#endif // !PICODOOM_HDMI
 
 // USB HID Usage Tables 1.12, table 12 (Keyboard/Keypad Page) usage IDs ->
 // DOOM keycodes (doomdef.h). Unmapped entries are 0 (never matches a real
@@ -139,12 +161,15 @@ bool g_prev_f10_down = false;
 bool g_prev_f11_down = false;
 bool g_prev_f12_down = false;
 
+#ifndef PICODOOM_HDMI
 // Live SPI pixel-clock tuning (F1 up / F2 down) -- see hid_to_doom_key()'s
 // doc comment. Temporary, for finding this panel/wiring's real corruption
-// ceiling by hand (2026-09 performance work).
+// ceiling by hand (2026-09 performance work). LCD-build-only -- see the
+// I_StartTic() call site below.
 bool g_prev_f1_down = false;
 bool g_prev_f2_down = false;
 constexpr int32_t kPixelClockStepHz = 1'000'000;
+#endif
 
 void post_key(int doomkey, bool down)
 {
@@ -158,6 +183,7 @@ void post_key(int doomkey, bool down)
 
 } // namespace
 
+#ifndef PICODOOM_HDMI
 // Launches core1 (see core1_entry() above). Called once from main()
 // (src/PicoDoom.cpp), before D_DoomMain() -- gives the keyboard time to
 // enumerate while the WAD loads and the engine initializes, rather than
@@ -167,12 +193,32 @@ extern "C" void usb_hid_core1_init(void)
     multicore_reset_core1(); // defensive, matches Pico-PIO-USB's own reference examples
     multicore_launch_core1_with_stack(core1_entry, g_core1_stack, sizeof(g_core1_stack));
 }
+#else
+// HDMI build's counterpart: brings up the host stack on core0 (see file
+// header) instead of launching core1 -- core1 belongs to
+// src/i_video_dvi.cpp. Called once from main() (src/PicoDoom.cpp), same
+// call site/timing as usb_hid_core1_init() above. task() is polled from
+// I_StartTic() below, once per tic.
+extern "C" void usb_hid_core0_init(void)
+{
+    g_usb_hid.init(pico_toolset::configs::usb_hid::kWaveshareRp2350PiZeroHdmi);
+}
+#endif
 
 extern "C" void I_StartTic(void)
 {
     int i;
     bool ctrl, shift, alt;
     const uint8_t* keymap = hid_to_doom_key();
+
+#ifdef PICODOOM_HDMI
+    // core0 owns the USB host stack in this build (see file header) --
+    // service it once per tic. Looser than TinyUSB's native once-per-loop-
+    // iteration polling (~28.5ms at 35 ticks/sec vs. effectively
+    // continuous), a real and permanent cost (not a bug) this build accepts
+    // since there's no SPI-feed core1 contention to avoid instead.
+    pico_toolset::UsbHidHost::task();
+#endif
 
     bool connected = g_usb_hid.connected_keyboard_count() > 0;
     if (connected != g_prev_connected) {
@@ -215,9 +261,11 @@ extern "C" void I_StartTic(void)
         g_prev_alt = alt;
     }
 
+#ifndef PICODOOM_HDMI
     // Live SPI pixel-clock tuning (F1 up / F2 down) -- edge-triggered, same
     // pattern as the mouse controls below. See hid_to_doom_key()'s doc
     // comment and i_video_bump_pixel_clock_hz()'s (src/i_video_ili9486.cpp).
+    // DVI has no adjustable pixel clock -- LCD-build-only.
     {
         bool f1_down = g_usb_hid.is_key_down(0x3A);
         bool f2_down = g_usb_hid.is_key_down(0x3B);
@@ -230,6 +278,7 @@ extern "C" void I_StartTic(void)
         g_prev_f1_down = f1_down;
         g_prev_f2_down = f2_down;
     }
+#endif
 
     // Mouse toggle (F12) / sensitivity (F11 up, F10 down) -- edge-triggered
     // (fire once per physical press, not once per poll while held), and

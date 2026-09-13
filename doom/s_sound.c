@@ -164,13 +164,14 @@ void S_Init
 {
   int		i;
 
-#ifdef PICO
-  // No audio output yet (Phase 4, deferred -- see docs/PLAN.md). Keep the
-  // volume globals valid (the menu reads/writes them regardless), but skip
-  // the channel-mixing array (channels stays NULL -- every other S_*
-  // function below is itself #ifdef PICO'd out before it would dereference
-  // that) and the per-sfx lumpnum/usefulness reset, since nothing ever
-  // caches sound data on this build.
+#if defined(PICO) && !defined(PICODOOM_HDMI)
+  // LCD build: no audio output (Phase 4, deferred -- see docs/PLAN.md).
+  // HDMI build (src/i_sound_dvi.cpp, docs/HDMI_PLAN.md) takes the real path
+  // below instead. Keep the volume globals valid (the menu reads/writes
+  // them regardless), but skip the channel-mixing array (channels stays
+  // NULL -- every other S_* function below is itself gated out before it
+  // would dereference that) and the per-sfx lumpnum/usefulness reset, since
+  // nothing ever caches sound data on this build.
   fprintf( stderr, "S_Init: sound disabled (no audio output yet)\n");
   S_SetSfxVolume(sfxVolume);
   S_SetMusicVolume(musicVolume);
@@ -216,7 +217,7 @@ void S_Start(void)
   int cnum;
   int mnum;
 
-#ifdef PICO
+#if defined(PICO) && !defined(PICODOOM_HDMI)
   // No audio output yet -- see S_Init's #ifdef PICO comment. channels[] was
   // never allocated, and music picks/loads a WAD lump for nothing (Phase 4
   // deferred), so nothing below is worth running.
@@ -275,7 +276,7 @@ S_StartSoundAtVolume
   int		sfx_id,
   int		volume )
 {
-#ifdef PICO
+#if defined(PICO) && !defined(PICODOOM_HDMI)
   // No audio output yet -- see S_Init's #ifdef PICO comment.
   return;
 #else
@@ -390,15 +391,20 @@ S_StartSoundAtVolume
   // cache data if necessary
   if (!sfx->data)
   {
+#ifndef PICODOOM_HDMI
     fprintf( stderr,
 	     "S_StartSoundAtVolume: 16bit and not pre-cached - wtf?\n");
-
-    // DOS remains, 8bit handling
+#endif
+    // DOS remains, 8bit handling. HDMI build: src/i_sound_dvi.cpp's
+    // I_StartSound() does the real caching itself (load_sfx(), first play
+    // of each distinct sound only) -- this dead 1993 caching path (and its
+    // debug print above, which fired every such first-play and flooded the
+    // serial console) isn't relevant there.
     //sfx->data = (void *) W_CacheLumpNum(sfx->lumpnum, PU_MUSIC);
     // fprintf( stderr,
     //	     "S_StartSoundAtVolume: loading %d (lump %d) : 0x%x\n",
     //       sfx_id, sfx->lumpnum, (int)sfx->data );
-    
+
   }
 #endif
   
@@ -493,7 +499,7 @@ S_StartSound
 
 void S_StopSound(void *origin)
 {
-#ifdef PICO
+#if defined(PICO) && !defined(PICODOOM_HDMI)
   // No audio output yet -- see S_Init's #ifdef PICO comment.
   return;
 #else
@@ -546,7 +552,7 @@ void S_ResumeSound(void)
 //
 void S_UpdateSounds(void* listener_p)
 {
-#ifdef PICO
+#if defined(PICO) && !defined(PICODOOM_HDMI)
   // No audio output yet -- see S_Init's #ifdef PICO comment. Called every
   // tic (see d_main.c), so this is the hottest of these no-ops -- worth
   // skipping the channels[] scan entirely rather than just guarding the

@@ -17,7 +17,11 @@ extern "C" {
 #include "pico_toolset/fault_handler.h"
 #include "board_config.hpp"
 extern "C" bool sd_init(void);
+#ifndef PICODOOM_HDMI
 extern "C" void usb_hid_core1_init(void); // src/i_input_usbhid.cpp
+#else
+extern "C" void usb_hid_core0_init(void); // src/i_input_usbhid.cpp
+#endif
 
 static void fatal(const char* msg)
 {
@@ -34,25 +38,61 @@ int main(void)
     // SPI clock = clk_sys/2 = ~75MHz at boot. Unlike clk_peri (which needs
     // explicit re-sourcing to follow clk_sys at all -- see below), flash's
     // QMI computes its SPI clock as clk_sys/CLKDIV directly with no
-    // separate clock-tree source, so raising clk_sys to 200MHz WITHOUT
-    // touching this divisor would silently raise the physical flash SPI
-    // clock too, to 100MHz -- entirely unvalidated on this hardware, unlike
-    // every other clock change this session (PSRAM/SPI display), and far
-    // riskier since ALL code except explicitly RAM-placed functions
-    // executes via XIP from this same flash: a misread instruction fails
-    // very differently (and worse) than a corrupted pixel. RP2350's own
-    // QMI_M0_TIMING_CLKDIV register docs explicitly warn about exactly this
-    // ordering: "If software is increasing CLKDIV in anticipation of an
-    // increase [in clk_sys], the increase must be applied before the
-    // clk_sys increase" -- so bump it here, first, safe to do on-the-fly
-    // per those same docs (unlike the other M0 timing fields, which need
-    // the QMI idle). Divisor 3 (not boot2's 2) keeps flash at 200/3 =
-    // 66.67MHz once clk_sys rises below, i.e. BELOW the 75MHz it already
-    // proved stable at, rather than blindly exceeding it.
+    // separate clock-tree source, so raising clk_sys WITHOUT touching this
+    // divisor would silently raise the physical flash SPI clock too --
+    // entirely unvalidated on this hardware, unlike every other clock
+    // change this session (PSRAM/SPI display), and far riskier since ALL
+    // code except explicitly RAM-placed functions executes via XIP from
+    // this same flash: a misread instruction fails very differently (and
+    // worse) than a corrupted pixel. RP2350's own QMI_M0_TIMING_CLKDIV
+    // register docs explicitly warn about exactly this ordering: "If
+    // software is increasing CLKDIV in anticipation of an increase [in
+    // clk_sys], the increase must be applied before the clk_sys increase"
+    // -- so bump it here, first, safe to do on-the-fly per those same docs
+    // (unlike the other M0 timing fields, which need the QMI idle).
+    //
+    // Divisor picked per build to land safely BELOW the ~75MHz flash SPI
+    // clock already proven stable at boot2's own divisor=2/~150MHz clk_sys,
+    // rather than blindly exceeding it: LCD's clk_sys=200MHz/3=66.67MHz;
+    // HDMI's clk_sys=252MHz/4=63MHz (see below for why HDMI's clk_sys
+    // differs from LCD's).
+#ifdef PICODOOM_HDMI
+    constexpr uint32_t kFlashClkDiv = 4;
+#else
+    constexpr uint32_t kFlashClkDiv = 3;
+#endif
     hw_write_masked(&qmi_hw->m[0].timing,
-                     3u << QMI_M0_TIMING_CLKDIV_LSB,
+                     kFlashClkDiv << QMI_M0_TIMING_CLKDIV_LSB,
                      QMI_M0_TIMING_CLKDIV_BITS);
 
+#ifdef PICODOOM_HDMI
+    // HDMI build: clk_sys MUST be exactly 252MHz, not the LCD build's
+    // 200MHz -- confirmed on real hardware in TOM6809 (same board, same
+    // pico_toolset_dvi_hdmi): src/i_video_dvi.cpp's DVI/TMDS PIO serialiser
+    // derives its bit clock directly from whatever clk_sys is at
+    // dvi_init() time (dvi_timing_640x480p_60hz.bit_clk_khz == 252000;
+    // that timing's own comment says "we do this mode properly, with a
+    // pretty comfortable clk_sys (252 MHz)", and every real consumer of it
+    // -- including Waveshare's own hello_dvi demo for this exact board --
+    // sets clk_sys to exactly this before dvi_init()). Left at any other
+    // clk_sys, the PIO clock-divider math is wrong and the DMA/PIO scanout
+    // pipeline stalls indefinitely with no video signal at all (confirmed:
+    // this is exactly what an earlier revision of this file did, at
+    // 200MHz, and why). 252MHz conveniently also satisfies Pico-PIO-USB's
+    // own separate requirement (pico_toolset_usb_hid's hcd_pio_usb.c derives
+    // its bit timing the same way, needing an exact multiple of 12MHz --
+    // 252/12=21) for this build's core0-hosted USB-PIO stack (see
+    // src/i_input_usbhid.cpp), so there's no conflict between the two.
+    // vreg_set_voltage(VREG_VOLTAGE_1_20) (not the LCD build's 1.15V) --
+    // matching the same real-hardware-validated recipe -- for signal margin
+    // at this higher clock. Must happen here, before anything else (uSD,
+    // PSRAM) runs: psram_init() below calibrates its own QMI timing
+    // divisors against whatever clk_sys is active at that point, so
+    // changing clk_sys afterward would desync it.
+    vreg_set_voltage(VREG_VOLTAGE_1_20);
+    sleep_ms(10);
+    set_sys_clock_khz(252'000, true);
+#else
     // Overclock clk_sys from the RP2350 default 150MHz to 200MHz (2026-09
     // performance work): lets PSRAM's QMI clock hit exactly 100MHz at
     // divisor=2 (clk_sys/2 -- see psram_configs.h, whose max_clock_hz=75MHz
@@ -63,14 +103,13 @@ int main(void)
     // vreg_disable_voltage_limit() isn't needed. Every peripheral
     // initialized below queries the actual current clock at ITS OWN init
     // time, so doing this first, before anything else, is what lets it
-    // propagate correctly -- must not move later in boot. NOT YET validated
-    // on real hardware -- this is a whole-chip timing change (unlike the
-    // earlier PSRAM-only clock change), so watch for ANY instability
-    // (resets, corrupted PSRAM/flash reads, USB dropouts), not just display
-    // artifacts, across multiple cold boots.
+    // propagate correctly -- must not move later in boot. Hardware-verified
+    // (2026-09): stable across multiple cold boots, no resets or corrupted
+    // PSRAM/flash reads/USB dropouts observed.
     vreg_set_voltage(VREG_VOLTAGE_1_15);
     sleep_ms(10);
     set_sys_clock_khz(200'000, true);
+#endif
 
     // clk_peri (the SPI baud generator's clock source, see
     // src/i_video_ili9486.cpp's F1/F2 tuning) does NOT automatically follow
@@ -136,12 +175,19 @@ int main(void)
         fatal("uSD mount failed (is a FAT32 card with the WAD inserted?)");
     printf("PicoDoom: uSD mounted\n");
 
-    // Phase 3: USB-PIO HID keyboard/mouse host (GPIO28/29), on its own
-    // core1 -- started here, before D_DoomMain(), so it has the whole
-    // WAD-load/engine-init stretch to enumerate a keyboard before the game
-    // loop starts polling it (see src/i_input_usbhid.cpp).
+    // Phase 3: USB-PIO HID keyboard/mouse host (GPIO28/29) -- started here,
+    // before D_DoomMain(), so it has the whole WAD-load/engine-init stretch
+    // to enumerate a keyboard before the game loop starts polling it (see
+    // src/i_input_usbhid.cpp). LCD build: its own core1. HDMI build: core0
+    // (core1 belongs to src/i_video_dvi.cpp's DVI encode loop instead) --
+    // see src/i_input_usbhid.cpp's file header for why.
+#ifndef PICODOOM_HDMI
     printf("PicoDoom: USB-PIO keyboard host init (core1)...\n");
     usb_hid_core1_init();
+#else
+    printf("PicoDoom: USB-PIO keyboard host init (core0)...\n");
+    usb_hid_core0_init();
+#endif
 
     // Engine globals (m_argv.c); no command-line parameters for now --
     // IdentifyVersion finds the WAD (doom1.wad/doom.wad/... ) on the SD root.

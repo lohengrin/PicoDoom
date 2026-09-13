@@ -27,6 +27,19 @@ if(NOT DEFINED PICO_BOARD)
 endif()
 set(PICO_BOARD_HEADER_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/pico-toolset/boards CACHE STRING "" FORCE)
 
+# Output driver: "lcd" (default, external Waveshare ILI9486 SPI panel) or
+# "hdmi" (onboard DVI/HDMI TMDS connector, via Pico-Toolset's
+# pico_toolset_dvi_hdmi -- see docs/HDMI_PLAN.md). A single enum-valued cache
+# variable rather than two independent booleans (TOM6809's
+# WAVESHARE_HDMI_SUPPORT/WAVESHARE_LCD_SUPPORT pattern): "both at once" is
+# then structurally impossible, so no separate FATAL_ERROR guard is needed
+# beyond validating the string itself, below.
+set(PICODOOM_VIDEO_OUTPUT "lcd" CACHE STRING "Output driver: lcd | hdmi")
+set_property(CACHE PICODOOM_VIDEO_OUTPUT PROPERTY STRINGS lcd hdmi)
+if(NOT PICODOOM_VIDEO_OUTPUT STREQUAL "lcd" AND NOT PICODOOM_VIDEO_OUTPUT STREQUAL "hdmi")
+    message(FATAL_ERROR "PICODOOM_VIDEO_OUTPUT must be 'lcd' or 'hdmi', got '${PICODOOM_VIDEO_OUTPUT}'")
+endif()
+
 # initialize the SDK based on PICO_SDK_PATH
 # note: this must happen before project()
 include(pico_sdk_import.cmake)
@@ -41,19 +54,31 @@ set(CMAKE_CXX_STANDARD 20)
 pico_sdk_init()
 
 # Pico-Toolset (submodule, third_party/pico-toolset) provides every
-# non-engine driver this project uses: pico_toolset_ili9486 (LCD),
-# pico_toolset_usb_hid (PIO-USB keyboard/mouse host, PICO_DEFAULT_PIO_USB_DP_PIN/
-# GPIO28-29 -- RP2350's own USB peripheral is native-device-only and already
-# committed to stdio_usb's serial console), pico_toolset_sdcard (uSD/FatFs +
-# its opt-in POSIX/stdio syscall shim), pico_toolset_psram, and
-# pico_toolset_fault_handler. SSD1306/XPT2046/I2S_AUDIO/RESET_BUTTONS/
-# DVI_HDMI/SCREEN are unused by this project -- off to skip building them.
+# non-engine driver this project uses: pico_toolset_ili9486 (LCD) or
+# pico_toolset_dvi_hdmi (HDMI, see PICODOOM_VIDEO_OUTPUT above), depending on
+# the selected output driver; pico_toolset_usb_hid (PIO-USB keyboard/mouse
+# host, PICO_DEFAULT_PIO_USB_DP_PIN/GPIO28-29 -- RP2350's own USB peripheral
+# is native-device-only and already committed to stdio_usb's serial
+# console), pico_toolset_sdcard (uSD/FatFs + its opt-in POSIX/stdio syscall
+# shim), pico_toolset_psram, and pico_toolset_fault_handler.
+# SSD1306/XPT2046/I2S_AUDIO/RESET_BUTTONS/SCREEN are unused by this project
+# -- off to skip building them, regardless of output driver.
 set(PICO_TOOLSET_BUILD_SSD1306 OFF CACHE BOOL "" FORCE)
 set(PICO_TOOLSET_BUILD_XPT2046 OFF CACHE BOOL "" FORCE)
 set(PICO_TOOLSET_BUILD_I2S_AUDIO OFF CACHE BOOL "" FORCE)
 set(PICO_TOOLSET_BUILD_RESET_BUTTONS OFF CACHE BOOL "" FORCE)
-set(PICO_TOOLSET_BUILD_DVI_HDMI OFF CACHE BOOL "" FORCE)
 set(PICO_TOOLSET_BUILD_SCREEN OFF CACHE BOOL "" FORCE)
+if(PICODOOM_VIDEO_OUTPUT STREQUAL "hdmi")
+    set(PICO_TOOLSET_BUILD_ILI9486 OFF CACHE BOOL "" FORCE)
+    set(PICO_TOOLSET_BUILD_DVI_HDMI ON CACHE BOOL "" FORCE)
+    # HDMI data-island digital audio -- on from Phase B (SFX) onward, see
+    # docs/HDMI_PLAN.md's phased rollout and src/i_sound_dvi.cpp.
+    set(PICO_TOOLSET_DVI_HDMI_AUDIO ON CACHE BOOL "" FORCE)
+else()
+    set(PICO_TOOLSET_BUILD_ILI9486 ON CACHE BOOL "" FORCE)
+    set(PICO_TOOLSET_BUILD_DVI_HDMI OFF CACHE BOOL "" FORCE)
+    set(PICO_TOOLSET_DVI_HDMI_AUDIO OFF CACHE BOOL "" FORCE)
+endif()
 # Doom's WAD loader (doom/w_wad.c) seeks around inside files via libc stdio,
 # so this project needs the sdcard component's POSIX syscall shim, not just
 # its whole-file-into-memory list_files()/read_file() API -- see
@@ -71,7 +96,7 @@ doom/i_system.c
 #doom/i_net.c       # Linux IPX — not linkable on Pico
 #doom/i_video_pimoroni.c   # also X11 (misnomer)
 #doom/i_video_null.c       # headless stub, replaced by src/i_video_ili9486.cpp
-doom/i_sound_null.c
+#doom/i_sound_null.c       # headless stub -- added below via PICODOOM_SOUND_SRC instead
 doom/i_net_null.c
 doom/tables.c
 doom/f_finale.c
@@ -167,12 +192,22 @@ foreach(f ${DOOMSRC})
     endif()
 endforeach()
 
+# Video/sound source swap, driven by PICODOOM_VIDEO_OUTPUT (see above).
+set(PICODOOM_VIDEO_SRC src/i_video_ili9486.cpp)
+set(PICODOOM_SOUND_SRC doom/i_sound_null.c)
+if(PICODOOM_VIDEO_OUTPUT STREQUAL "hdmi")
+    set(PICODOOM_VIDEO_SRC src/i_video_dvi.cpp)
+    # Phase B (SFX) of docs/HDMI_PLAN.md's rollout -- see src/i_sound_dvi.cpp.
+    set(PICODOOM_SOUND_SRC src/i_sound_dvi.cpp)
+endif()
+
 # rest of your project
 add_executable(PicoDoom
 src/PicoDoom.cpp
 src/sd_stdio.cpp
-src/i_video_ili9486.cpp
+${PICODOOM_VIDEO_SRC}
 src/i_input_usbhid.cpp
+${PICODOOM_SOUND_SRC}
 ${DOOMSRC}
 )
 
@@ -222,7 +257,8 @@ target_link_libraries(PicoDoom
     pico_toolset_sdcard
     pico_toolset_psram
     pico_toolset_fault_handler
-    pico_toolset_ili9486
+    $<$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},lcd>:pico_toolset_ili9486>
+    $<$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},hdmi>:pico_toolset_dvi_hdmi>
     pico_toolset_usb_hid
     pico_multicore
     hardware_watchdog
@@ -234,11 +270,28 @@ target_include_directories(PicoDoom PRIVATE
 )
 
 target_compile_definitions(PicoDoom PRIVATE PICO)
-# PICO_PIO_USE_GPIO_BASE=1 no longer needs setting here: pico_toolset_sdcard
-# links pico_fatfs PUBLIC, and third_party/pico-toolset/cmake/pico_fatfs.cmake
-# already sets it as an INTERFACE definition on that target for every
-# consumer (this board's uSD MISO pin, GPIO40, is >31 and pico_fatfs's
-# generated PIO driver would otherwise silently alias it to GPIO8).
+if(PICODOOM_VIDEO_OUTPUT STREQUAL "hdmi")
+    # PICODOOM_HDMI drives the #ifdef split in src/i_input_usbhid.cpp (USB
+    # HID host moves from core1 to core0 -- core1 belongs to the DVI encode
+    # loop exclusively, see src/i_video_dvi.cpp) and src/PicoDoom.cpp's
+    # matching init-call choice.
+    target_compile_definitions(PicoDoom PRIVATE PICODOOM_HDMI=1)
+    # RP2350B's onboard TMDS pins (GPIO32-39) are >=32 -- the PIO block only
+    # sees one 32-pin window at a time, and this (plus src/i_video_dvi.cpp's
+    # own pio_set_gpio_base() call before dvi_init()) lets it move that
+    # window for DVI's PIO block specifically. Explicit here because this
+    # build's uSD wiring may not need it itself -- don't rely on the
+    # LCD-build comment below, which is about a different PIO consumer.
+    target_compile_definitions(PicoDoom PRIVATE PICO_PIO_USE_GPIO_BASE=1)
+endif()
+# PICO_PIO_USE_GPIO_BASE=1 no longer needs setting here for the LCD build:
+# pico_toolset_sdcard links pico_fatfs PUBLIC, and
+# third_party/pico-toolset/cmake/pico_fatfs.cmake already sets it as an
+# INTERFACE definition on that target for every consumer (this board's uSD
+# MISO pin, GPIO40, is >31 and pico_fatfs's generated PIO driver would
+# otherwise silently alias it to GPIO8). The HDMI build sets it explicitly
+# above as well, for DVI's own PIO block -- redundant but harmless on that
+# build (both request the same value).
 
 # Linking tinyusb_host (via pico_toolset_usb_hid, above) flips FOUR separate
 # SDK defaults that only exist to detect "is this app using TinyUSB itself,

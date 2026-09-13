@@ -14,7 +14,9 @@
 //
 // 2026-09 performance work.
 
+#ifndef PICODOOM_HDMI
 #include "pico_toolset/ili9486_configs.h"
+#endif
 #include "pico_toolset/psram_configs.h"
 
 namespace picodoom {
@@ -31,6 +33,7 @@ inline pico_toolset::PsramConfig psram_config() {
     return c;
 }
 
+#ifndef PICODOOM_HDMI
 inline pico_toolset::Ili9486Config ili9486_config() {
     pico_toolset::Ili9486Config c = pico_toolset::configs::ili9486::kWaveshareRp2350PiZero;
     // Live-tuned via F1/F2 (i_video_bump_pixel_clock_hz(),
@@ -45,5 +48,6 @@ inline pico_toolset::Ili9486Config ili9486_config() {
     c.pixel_freq_hz = 33'333'333;
     return c;
 }
+#endif
 
 } // namespace picodoom
