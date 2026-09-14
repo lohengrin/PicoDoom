@@ -39,76 +39,65 @@ int main(void)
     // explicit re-sourcing to follow clk_sys at all -- see below), flash's
     // QMI computes its SPI clock as clk_sys/CLKDIV directly with no
     // separate clock-tree source, so raising clk_sys WITHOUT touching this
-    // divisor would silently raise the physical flash SPI clock too --
-    // entirely unvalidated on this hardware, unlike every other clock
-    // change this session (PSRAM/SPI display), and far riskier since ALL
-    // code except explicitly RAM-placed functions executes via XIP from
-    // this same flash: a misread instruction fails very differently (and
-    // worse) than a corrupted pixel. RP2350's own QMI_M0_TIMING_CLKDIV
-    // register docs explicitly warn about exactly this ordering: "If
-    // software is increasing CLKDIV in anticipation of an increase [in
-    // clk_sys], the increase must be applied before the clk_sys increase"
-    // -- so bump it here, first, safe to do on-the-fly per those same docs
-    // (unlike the other M0 timing fields, which need the QMI idle).
+    // divisor would silently raise the physical flash SPI clock too.
+    // RP2350's own QMI_M0_TIMING_CLKDIV register docs explicitly warn about
+    // exactly this ordering: "If software is increasing CLKDIV in
+    // anticipation of an increase [in clk_sys], the increase must be
+    // applied before the clk_sys increase" -- so write it here, first,
+    // safe to do on-the-fly per those same docs (unlike the other M0
+    // timing fields, which need the QMI idle).
     //
-    // Divisor picked per build to land safely BELOW the ~75MHz flash SPI
-    // clock already proven stable at boot2's own divisor=2/~150MHz clk_sys,
-    // rather than blindly exceeding it: LCD's clk_sys=200MHz/3=66.67MHz;
-    // HDMI's clk_sys=252MHz/4=63MHz (see below for why HDMI's clk_sys
-    // differs from LCD's).
-#ifdef PICODOOM_HDMI
-    constexpr uint32_t kFlashClkDiv = 4;
-#else
-    constexpr uint32_t kFlashClkDiv = 3;
-#endif
+    // CLKDIV=2 unconditionally, both builds, so flash SPI = clk_sys/2 tracks
+    // the (build-specific) clk_sys below: 264/2 = 132MHz for the LCD build,
+    // 252/2 = 126MHz for HDMI. That deliberately exceeds the ~75MHz proven
+    // stable at boot2's own divisor=2/~150MHz clk_sys -- chosen by
+    // instruction to unify on divisor 2 across flash and PSRAM rather than
+    // stay under that baseline, and far riskier than a corrupted pixel since
+    // ALL code except explicitly RAM-placed functions executes via XIP from
+    // this same flash: a misread instruction fails very differently (and
+    // worse). If XIP misreads show up, raise this divisor, not the hardware.
+    constexpr uint32_t kFlashClkDiv = 2;
     hw_write_masked(&qmi_hw->m[0].timing,
                      kFlashClkDiv << QMI_M0_TIMING_CLKDIV_LSB,
                      QMI_M0_TIMING_CLKDIV_BITS);
 
-#ifdef PICODOOM_HDMI
-    // HDMI build: clk_sys MUST be exactly 252MHz, not the LCD build's
-    // 200MHz -- confirmed on real hardware in TOM6809 (same board, same
-    // pico_toolset_dvi_hdmi): src/i_video_dvi.cpp's DVI/TMDS PIO serialiser
-    // derives its bit clock directly from whatever clk_sys is at
-    // dvi_init() time (dvi_timing_640x480p_60hz.bit_clk_khz == 252000;
-    // that timing's own comment says "we do this mode properly, with a
-    // pretty comfortable clk_sys (252 MHz)", and every real consumer of it
+    // clk_sys differs per build, both at VREG_VOLTAGE_1_20. HDMI build:
+    // exactly 252MHz, a hard requirement -- confirmed on real hardware in
+    // TOM6809 (same board, same pico_toolset_dvi_hdmi): src/i_video_dvi.cpp's
+    // DVI/TMDS PIO serialiser derives its bit clock directly from whatever
+    // clk_sys is at dvi_init() time (dvi_timing_640x480p_60hz.bit_clk_khz ==
+    // 252000; that timing's own comment says "we do this mode properly, with
+    // a pretty comfortable clk_sys (252 MHz)", and every real consumer of it
     // -- including Waveshare's own hello_dvi demo for this exact board --
     // sets clk_sys to exactly this before dvi_init()). Left at any other
     // clk_sys, the PIO clock-divider math is wrong and the DMA/PIO scanout
     // pipeline stalls indefinitely with no video signal at all (confirmed:
     // this is exactly what an earlier revision of this file did, at
-    // 200MHz, and why). 252MHz conveniently also satisfies Pico-PIO-USB's
-    // own separate requirement (pico_toolset_usb_hid's hcd_pio_usb.c derives
-    // its bit timing the same way, needing an exact multiple of 12MHz --
-    // 252/12=21) for this build's core0-hosted USB-PIO stack (see
-    // src/i_input_usbhid.cpp), so there's no conflict between the two.
-    // vreg_set_voltage(VREG_VOLTAGE_1_20) (not the LCD build's 1.15V) --
-    // matching the same real-hardware-validated recipe -- for signal margin
-    // at this higher clock. Must happen here, before anything else (uSD,
+    // 200MHz, and why). LCD build: 264MHz (by instruction, raised from the
+    // previously-unified 252MHz) -- clk_peri follows at 264MHz (see below),
+    // letting the ~33MHz SPI pixel-clock request resolve to exactly
+    // 264/8 = 33.0MHz (see board_config.hpp's ili9486_config()).
+    // Both clocks keep the QMI divisors at 2 (flash + PSRAM = clk_sys/2 =
+    // 132MHz LCD / 126MHz HDMI, see board_config.hpp's psram_config()) and
+    // satisfy Pico-PIO-USB's separate requirement (pico_toolset_usb_hid's
+    // hcd_pio_usb.c derives its bit timing the same way, needing an exact
+    // multiple of 12MHz: 264/12=22, 252/12=21) regardless of which core
+    // hosts it, so there's no conflict between the clock-sensitive
+    // subsystems in either build. VREG_VOLTAGE_1_20 is the
+    // real-hardware-validated recipe for 252MHz -- the standard convention
+    // for RP2040/RP2350 stability above the ~133-150MHz default-voltage
+    // ceiling (within VREG_VOLTAGE_MAX (1.30V), so
+    // vreg_disable_voltage_limit() isn't needed) -- carried over to the LCD
+    // build's higher 264MHz. Must happen here, before anything else (uSD,
     // PSRAM) runs: psram_init() below calibrates its own QMI timing
     // divisors against whatever clk_sys is active at that point, so
     // changing clk_sys afterward would desync it.
     vreg_set_voltage(VREG_VOLTAGE_1_20);
     sleep_ms(10);
+#ifdef PICODOOM_HDMI
     set_sys_clock_khz(252'000, true);
 #else
-    // Overclock clk_sys from the RP2350 default 150MHz to 200MHz (2026-09
-    // performance work): lets PSRAM's QMI clock hit exactly 100MHz at
-    // divisor=2 (clk_sys/2 -- see psram_configs.h, whose max_clock_hz=75MHz
-    // was itself the ceiling reachable at 150MHz without exceeding the
-    // chip's ~100MHz spec). vreg_set_voltage() bump is the standard
-    // convention for RP2040/RP2350 stability above the ~133-150MHz
-    // default-voltage ceiling; 1.15V is within VREG_VOLTAGE_MAX (1.30V) so
-    // vreg_disable_voltage_limit() isn't needed. Every peripheral
-    // initialized below queries the actual current clock at ITS OWN init
-    // time, so doing this first, before anything else, is what lets it
-    // propagate correctly -- must not move later in boot. Hardware-verified
-    // (2026-09): stable across multiple cold boots, no resets or corrupted
-    // PSRAM/flash reads/USB dropouts observed.
-    vreg_set_voltage(VREG_VOLTAGE_1_15);
-    sleep_ms(10);
-    set_sys_clock_khz(200'000, true);
+    set_sys_clock_khz(264'000, true);
 #endif
 
     // clk_peri (the SPI baud generator's clock source, see
