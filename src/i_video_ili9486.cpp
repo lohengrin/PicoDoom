@@ -82,6 +82,7 @@ extern "C" {
 #include "v_video.h"
 }
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <malloc.h>
@@ -111,6 +112,51 @@ pico_toolset::Ili9486 g_display;
 // of DisplayPanel by design.
 pico_toolset::DisplayPanel& g_panel = g_display;
 uint16_t g_rgb565_wire_lut[256];
+// Gamma factor applied at RGB565-LUT-build time (F3/F4 in
+// src/i_input_usbhid.cpp) -- this whole file is LCD-build-only
+// (PICODOOM_VIDEO_OUTPUT=lcd), see CMakeLists.txt. Defaults to 1.4 (a
+// slight brighten -- gammatable[usegamma]'s + gamma table reads a bit dark
+// on this panel; kept as the F3/F4 baseline); pressing down to exactly 1.0
+// engages an identity fast path in rebuild_rgb565_lut() so an uncorrected
+// palette is byte-identical to the pre-gamma build.
+// Core0-owned: written by I_SetPalette()/i_video_bump_gamma(), read only --
+// indirectly, via the LUT -- in I_FinishUpdate(). core1 never sees either
+// (the Phase 6 blit is pure DMA of already-converted buffers), so no
+// cross-core synchronization is needed.
+float g_gamma = 1.4f;
+// Raw PLAYPAL byte data from the last I_SetPalette() -- kept so F3/F4 can
+// rebuild the LUT at a new gamma without the engine re-handing the palette
+// over (it only calls I_SetPalette() when it itself changes the palette,
+// e.g. level start or the options-menu gamma setting).
+byte g_palette_cache[256 * 3];
+
+// Core0-only (see g_gamma/g_palette_cache above). Runs the cached raw
+// palette through gamma + gammatable[usegamma] into the wire-order RGB565
+// LUT I_FinishUpdate() indexes per pixel. Rebuilt wholesale on every
+// I_SetPalette() and every F3/F4 gamma change -- 256 entries, one-time
+// cost, not per frame.
+void rebuild_rgb565_lut() {
+    for (int i = 0; i < 256; ++i) {
+        byte r = gammatable[usegamma][g_palette_cache[i * 3 + 0]];
+        byte g = gammatable[usegamma][g_palette_cache[i * 3 + 1]];
+        byte b = gammatable[usegamma][g_palette_cache[i * 3 + 2]];
+        if (g_gamma != 1.0f) {
+            // Per-channel power curve (v/255)^(1/gamma): gamma > 1
+            // brightens, < 1 darkens. (v/255) only round-trips exactly
+            // through float for v divisible by 255, hence the identity fast
+            // path -- at gamma 1.0 we skip the divide-and-back entirely
+            // rather than perturb the palette with float rounding.
+            const float inv = 1.0f / g_gamma;
+            r = static_cast<byte>(255.0f * powf(r / 255.0f, inv) + 0.5f);
+            g = static_cast<byte>(255.0f * powf(g / 255.0f, inv) + 0.5f);
+            b = static_cast<byte>(255.0f * powf(b / 255.0f, inv) + 0.5f);
+        }
+        uint16_t rgb565 = static_cast<uint16_t>(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+        // Byte-swapped for MSB-first-over-SPI wire order (see
+        // pico_toolset::Ili9486::write_pixels()).
+        g_rgb565_wire_lut[i] = static_cast<uint16_t>((rgb565 << 8) | (rgb565 >> 8));
+    }
+}
 
 constexpr int kDstWidth = SCREENWIDTH;   // 320, 1:1 -- see file header
 constexpr int kDstHeight = SCREENHEIGHT; // 200
@@ -240,23 +286,16 @@ void I_InitGraphics(void) {
     // above) -- fill_solid() already called set_window() at least once, so
     // pixel_clock_actual_hz() reflects the real applied rate, not just the
     // static config's request.
-    printf("PicoDoom: SPI pixel clock requested=%u Hz  actual=%u Hz\n",
-           (unsigned)g_display.pixel_clock_hz(), (unsigned)g_display.pixel_clock_actual_hz());
+    printf("PicoDoom: SPI pixel clock requested=%u Hz  actual=%u Hz  gamma %.2f\n",
+           (unsigned)g_display.pixel_clock_hz(), (unsigned)g_display.pixel_clock_actual_hz(), g_gamma);
 }
 
 void I_ShutdownGraphics(void) {}
 
 // Takes full 8 bit values (i_video.h).
 void I_SetPalette(byte* palette) {
-    for (int i = 0; i < 256; ++i) {
-        byte r = gammatable[usegamma][*palette++];
-        byte g = gammatable[usegamma][*palette++];
-        byte b = gammatable[usegamma][*palette++];
-        uint16_t rgb565 = static_cast<uint16_t>(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
-        // Byte-swapped for MSB-first-over-SPI wire order (see
-        // pico_toolset::Ili9486::write_pixels()).
-        g_rgb565_wire_lut[i] = static_cast<uint16_t>((rgb565 << 8) | (rgb565 >> 8));
-    }
+    memcpy(g_palette_cache, palette, sizeof(g_palette_cache));
+    rebuild_rgb565_lut();
 }
 
 void I_UpdateNoBlit(void) {}
@@ -324,6 +363,25 @@ void i_video_bump_pixel_clock_hz(int32_t delta_hz) {
     g_display.set_pixel_clock_hz(next);
     printf("PicoDoom: SPI pixel clock requested=%u Hz  last actual=%u Hz\n",
            static_cast<unsigned>(next), static_cast<unsigned>(g_display.pixel_clock_actual_hz()));
+}
+
+// Gamma-factor tuning (F3/F4 in src/i_input_usbhid.cpp, LCD build only):
+// adjusts the factor I_SetPalette()'s LUT was built at -- see
+// rebuild_rgb565_lut() above for what that does. Rebuilding from the cached
+// raw PLAYPAL means the engine is never involved and the new setting takes
+// effect from the very next I_FinishUpdate(); the value is echoed to the
+// serial console, same pattern as the F1/F2 pixel-clock report. delta may
+// be negative; clamped to [0.1, 10].
+void i_video_bump_gamma(float delta) {
+    constexpr float kMinGamma = 0.1f;
+    constexpr float kMaxGamma = 10.0f;
+    g_gamma += delta;
+    if (g_gamma < kMinGamma)
+        g_gamma = kMinGamma;
+    else if (g_gamma > kMaxGamma)
+        g_gamma = kMaxGamma;
+    rebuild_rgb565_lut();
+    printf("PicoDoom: gamma %.2f\n", g_gamma);
 }
 
 // I_StartTic lives in src/i_input_usbhid.cpp (Phase 3, USB-PIO keyboard).

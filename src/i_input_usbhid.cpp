@@ -42,10 +42,12 @@ extern "C" {
 }
 
 #ifndef PICODOOM_HDMI
-// src/i_video_ili9486.cpp -- F1/F2 live SPI pixel-clock tuning below.
-// DVI has no adjustable pixel clock, so this (and its F1/F2 call sites)
-// only exist in the LCD build.
+// src/i_video_ili9486.cpp -- F1/F2 live SPI pixel-clock tuning and F3/F4
+// gamma-factor tuning below. DVI has no adjustable pixel clock (and this
+// port keeps the DVI path's brightness pipeline untouched), so these (and
+// their call sites) only exist in the LCD build.
 extern "C" void i_video_bump_pixel_clock_hz(int32_t delta_hz);
+extern "C" void i_video_bump_gamma(float delta);
 #endif
 
 #include "pico/multicore.h"
@@ -116,7 +118,15 @@ const uint8_t* hid_to_doom_key()
         table[0x2B] = KEY_TAB; table[0x2C] = ' ';
         table[0x2D] = KEY_MINUS; table[0x2E] = KEY_EQUALS;
         table[0x36] = ','; table[0x37] = '.'; table[0x38] = '/';
+#ifndef PICODOOM_HDMI
+        // F3/F4 (0x3C/0x3D) deliberately NOT mapped in the LCD build: they
+        // tune the gamma factor below (see the I_StartTic() block) instead
+        // of posting vanilla DOOM's KEY_F3 "load"/KEY_F4 "sound volume"
+        // (m_menu.c) -- same interception rationale as F1/F2. The HDMI build
+        // has no gamma adjustment and keeps the normal DOOM bindings.
+#else
         table[0x3C] = KEY_F3; table[0x3D] = KEY_F4;
+#endif
         table[0x3E] = KEY_F5; table[0x3F] = KEY_F6; table[0x40] = KEY_F7; table[0x41] = KEY_F8;
         table[0x42] = KEY_F9;
         // F1/F2 (0x3A/0x3B) and F10/F11/F12 (0x43-0x45) deliberately NOT
@@ -169,6 +179,14 @@ bool g_prev_f12_down = false;
 bool g_prev_f1_down = false;
 bool g_prev_f2_down = false;
 constexpr int32_t kPixelClockStepHz = 1'000'000;
+
+// Gamma-factor tuning (F3 down / F4 up) -- see the I_StartTic() block below
+// and i_video_bump_gamma() (src/i_video_ili9486.cpp). Also LCD-build-only:
+// i_video_bump_gamma() has no caller (and no definition) in the HDMI build.
+// 0.1 per press, same edge-triggered handling as F1/F2.
+bool g_prev_f3_down = false;
+bool g_prev_f4_down = false;
+constexpr float kGammaStep = 0.1f;
 #endif
 
 void post_key(int doomkey, bool down)
@@ -277,6 +295,22 @@ extern "C" void I_StartTic(void)
 
         g_prev_f1_down = f1_down;
         g_prev_f2_down = f2_down;
+
+        // Gamma-factor tuning (F3 down / F4 up) -- edge-triggered like the
+        // F1/F2 block above. Shadows vanilla DOOM's KEY_F3 "load"/KEY_F4
+        // "sound volume" in this build, see hid_to_doom_key()'s doc comment.
+        {
+            bool f3_down = g_usb_hid.is_key_down(0x3C);
+            bool f4_down = g_usb_hid.is_key_down(0x3D);
+
+            if (f3_down && !g_prev_f3_down)
+                i_video_bump_gamma(-kGammaStep);
+            if (f4_down && !g_prev_f4_down)
+                i_video_bump_gamma(kGammaStep);
+
+            g_prev_f3_down = f3_down;
+            g_prev_f4_down = f4_down;
+        }
     }
 #endif
 
