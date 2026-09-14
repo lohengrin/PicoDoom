@@ -168,11 +168,13 @@ constexpr int kFramePixels = kDstWidth * kDstHeight;
 // I_FinishUpdate() converts screens[0] (palette-indexed) into whichever of
 // these is free, writing ready-to-DMA RGB565-wire pixels directly (Phase 6);
 // core1 just DMAs one straight from PSRAM to the panel, then flags that slot
-// free again. Both slots PSRAM-backed: a single 128000-byte (kFramePixels *
-// sizeof(uint16_t)) slot is already most of Phase 4.6.1's proven SRAM-OOM
-// threshold on its own, so two of them (256000B total) stay off the newlib
-// heap entirely, same reasoning as that phase's doc history -- only the
-// clock got faster, not the SRAM budget.
+// free again. Both slots SRAM (newlib heap) since the Phase 7 (2026-09)
+// SRAM budget work: visplanes/viewangletox/vissprites moved out of .bss
+// into PSRAM (see doom/r_plane.c, r_main.c, r_things.c), funding the
+// 256000B that lands these two right back in SRAM -- the Phase 4.6.1 OOM
+// only happened because SRAM was still carrying those tables. I_InitGraphics
+// falls back to psram_malloc per slot if the heap is short, so a budget
+// miss degrades to the old layout instead of crashing the boot.
 uint16_t* g_screen_buf[2] = {nullptr, nullptr};
 // true = free for core0 to write screens[0]'s converted pixels into. Flip
 // conventions match PicoUsbKeyboard.cpp's g_active_buf: plain volatile
@@ -260,19 +262,29 @@ void I_InitGraphics(void) {
     // from src/PicoDoom.cpp before D_DoomMain()) and will start calling
     // i_video_core1_step() immediately -- but g_blit_buf_free starts all-true
     // and the inter-core FIFO starts empty, so it just no-ops until
-    // I_FinishUpdate() below ever pushes an index. Both slots PSRAM-backed
-    // (see g_screen_buf's doc comment).
+    // I_FinishUpdate() below ever pushes an index. Both slots SRAM (newlib
+    // malloc -- see g_screen_buf's doc comment), falling back per-slot to
+    // PSRAM if the heap is short so a budget miss degrades instead of OOM'ing
+    // the boot.
+    constexpr size_t kBlitBytes = kFramePixels * sizeof(uint16_t);
+    bool all_sram = true;
     for (uint16_t*& buf : g_screen_buf) {
-        buf = static_cast<uint16_t*>(pico_toolset::psram_malloc(kFramePixels * sizeof(uint16_t)));
+        buf = static_cast<uint16_t*>(malloc(kBlitBytes));
+        if (!buf) {
+            buf = static_cast<uint16_t*>(pico_toolset::psram_malloc(kBlitBytes));
+            all_sram = false;
+        }
         if (!buf)
             // I_Error's signature predates `const` (1993 C) -- cast, not a
             // real mutation.
             I_Error(const_cast<char*>("I_InitGraphics: failed to allocate blit buffer"));
         // Not load-bearing (I_FinishUpdate() always fills a slot before it's
-        // ever handed to core1), just avoids a stray uninitialized-PSRAM
+        // ever handed to core1), just avoids a stray uninitialized-SRAM/PSRAM
         // read if that ever stops being true.
-        memset(buf, 0, kFramePixels * sizeof(uint16_t));
+        memset(buf, 0, kBlitBytes);
     }
+    puts(all_sram ? "PicoDoom: blit buffers in SRAM"
+                  : "PicoDoom: blit buffers in PSRAM (SRAM heap short, fallback)");
 
     g_display.init(picodoom::ili9486_config());
     // Black out the whole panel once, independent of any palette/game state

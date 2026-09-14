@@ -40,6 +40,10 @@ static const char rcsid[] = "$Id: r_main.c,v 1.5 1997/02/03 22:45:12 b1 Exp $";
 #include "r_local.h"
 #include "r_sky.h"
 
+#ifdef PICO
+extern void *psram_malloc (size_t);
+#endif
+
 
 
 
@@ -95,7 +99,14 @@ angle_t			clipangle;
 // maps the visible view angles to screen X coordinates,
 // flattening the arc to a flat projection plane.
 // There will be many angles mapped to the same X. 
+#ifdef PICO
+// 16 KB of .bss: read a few hundred times per frame (per aimed seg/vertex
+// in r_bsp.c/r_segs.c), never written outside R_InitTextureMapping().
+// Cheap on PSRAM; backs the SRAM blit-buffer budget (see r_plane.c).
+int*			viewangletox;
+#else
 int			viewangletox[FINEANGLES/2];
+#endif
 
 // The xtoviewangleangle[] table maps a screen pixel
 // to the lowest viewangle that maps back to x ranges
@@ -552,6 +563,15 @@ void R_InitTextureMapping (void)
     int			t;
     fixed_t		focallength;
     
+#ifdef PICO
+    // R_InitTextureMapping() re-runs on every screen-size change (via
+    // R_ExecuteSetViewSize); the PSRAM pool only needs allocating once.
+    if (!viewangletox)
+	viewangletox = (int *) psram_malloc (FINEANGLES/2 * sizeof (*viewangletox));
+    if (!viewangletox)
+	I_Error ("R_InitTextureMapping: viewangletox alloc failed");
+#endif
+
     // Use tangent table to generate viewangletox:
     //  viewangletox will give the next greatest x
     //  after the view angle.

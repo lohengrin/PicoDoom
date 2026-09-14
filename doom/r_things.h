@@ -30,7 +30,11 @@
 
 #define MAXVISSPRITES  	128
 
+#ifdef PICO
+extern vissprite_t*	vissprites;
+#else
 extern vissprite_t	vissprites[MAXVISSPRITES];
+#endif
 extern vissprite_t*	vissprite_p;
 extern vissprite_t	vsprsortedhead;
 

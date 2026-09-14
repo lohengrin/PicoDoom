@@ -111,7 +111,11 @@ extern player_t*	viewplayer;
 // ?
 extern angle_t		clipangle;
 
+#ifdef PICO
+extern int*		viewangletox;
+#else
 extern int		viewangletox[FINEANGLES/2];
+#endif
 extern angle_t		xtoviewangle[SCREENWIDTH+1];
 //extern fixed_t		finetangent[FINEANGLES/2];
 

@@ -286,7 +286,16 @@ void R_InitSpriteDefs (char** namelist)
 //
 // GAME FUNCTIONS
 //
+#ifdef PICO
+// ~7.5 KB of .bss; only the sprites actually drawn this frame (usually a
+// handful) get touched per frame, so PSRAM backing is cheap. Funds the
+// SRAM blit-buffer budget (see r_plane.c's visplanes note). All uses are
+// pointer arithmetic / subscripting, identical for a pointer.
+extern void *psram_malloc (size_t);
+vissprite_t*	vissprites;
+#else
 vissprite_t	vissprites[MAXVISSPRITES];
+#endif
 vissprite_t*	vissprite_p;
 int		newvissprite;
 
@@ -300,6 +309,15 @@ void R_InitSprites (char** namelist)
 {
     int		i;
 	
+#ifdef PICO
+    // R_InitSprites() runs once per level load (P_SetupLevel); allocate the
+    // PSRAM pool just the first time so re-entry doesn't leak.
+    if (!vissprites)
+	vissprites = (vissprite_t *) psram_malloc (MAXVISSPRITES * sizeof (*vissprites));
+    if (!vissprites)
+	I_Error ("R_InitSprites: vissprite pool alloc failed");
+#endif
+
     for (i=0 ; i<SCREENWIDTH ; i++)
     {
 	negonearray[i] = -1;

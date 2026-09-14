@@ -39,6 +39,9 @@ rcsid[] = "$Id: r_plane.c,v 1.4 1997/02/03 16:47:55 b1 Exp $";
 #include "r_local.h"
 #include "r_sky.h"
 
+#ifdef PICO
+extern void *psram_malloc (size_t);
+#endif
 
 
 planefunction_t		floorfunc;
@@ -50,7 +53,18 @@ planefunction_t		ceilingfunc;
 
 // Here comes the obnoxious "visplane".
 #define MAXVISPLANES	128
+#ifdef PICO
+// The visplane pool is the biggest single static in the engine (~83 KB of
+// .bss). R_FindPlane/R_CheckPlane only ever touch the handful of planes
+// that are on-screen this frame (typically 1-4), so backing it with PSRAM
+// is cheap -- upstream kept it on the zone heap too. Frees the ~83 KB that
+// lets both LCD blit buffers live in SRAM (src/i_video_ili9486.cpp). All
+// uses below are pointer arithmetic / subscripting, identical for a
+// pointer against an allocated pool.
+visplane_t*		visplanes;
+#else
 visplane_t		visplanes[MAXVISPLANES];
+#endif
 visplane_t*		lastvisplane;
 visplane_t*		floorplane;
 visplane_t*		ceilingplane;
@@ -105,6 +119,15 @@ fixed_t			cachedystep[SCREENHEIGHT];
 //
 void R_InitPlanes (void)
 {
+#ifdef PICO
+  // Pool is in PSRAM (see the visplanes comment above); only ever called
+  // from R_Init(). psram_malloc is already usable here: PSRAM is brought
+  // up in main() before D_DoomMain().
+  if (!visplanes)
+    visplanes = (visplane_t *) psram_malloc (MAXVISPLANES * sizeof (*visplanes));
+  if (!visplanes)
+    I_Error ("R_InitPlanes: visplane pool alloc failed");
+#endif
   // Doh!
 }
 
