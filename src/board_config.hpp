@@ -58,8 +58,8 @@ inline pico_toolset::Ili9486Config ili9486_config() {
     // 33.0MHz -- right in the clean range confirmed at the original clock
     // (33.33MHz clean, everything from 40MHz up corrupted: 264/6=44MHz and
     // above are unreachable by this request anyway, since the SDK rounds
-    // down, never up). Request value 33'333'333 keeps F1/F2
-    // (i_video_bump_pixel_clock_hz(), src/i_video_ili9486.cpp) live-tuning
+    // down, never up). Request value 33'333'333 keeps the serial console's
+    // `pclk` live-tuning (i_video_set_pixel_clock_hz(), src/i_video_ili9486.cpp)
     // from the same baseline it was validated at.
     c.pixel_freq_hz = 33'333'333;
     return c;

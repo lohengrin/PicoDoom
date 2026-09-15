@@ -269,7 +269,15 @@ src/i_input_usbhid.cpp       # pico_toolset::UsbHidHost keyboard/mouse/gamepad h
                               # support (gamepad_state(0)'s A/B/X/Y -> fire/strafe/run/use, left
                               # stick+D-pad -> turn/move, menu navigation all pre-existing 1993 code,
                               # just never fed real input before); core1_entry()'s loop also drives
-                              # i_video_core1_step() (Phase 4.5, kept from the old PicoUsbKeyboard.cpp)
+                              # i_video_core1_step() (Phase 4.5, kept from the old PicoUsbKeyboard.cpp);
+                              # ALL F-keys post vanilla DOOM keys (help/save/load/volume/quit/gamma/
+                              # spy-mode, doom/m_menu.c + doom/g_game.c) -- the Pico tuning controls
+                              # that used to shadow F1-F4/F10-F12 live in the serial console instead
+src/i_serial_console.cpp     # Pico tuning console over the USB CDC (same link as printf, polled
+                              # from I_StartTic()): line-oriented commands gamma/pclk (LCD only)/
+                              # mouse/sens replace the freed F-key intercepts (see i_video_ili9486.cpp,
+                              # i_video_dvi.cpp, i_input_usbhid.cpp accessors); engine never reads
+                              # stdin on Pico, so this owns CDC input exclusively
 third_party/pico-toolset/    # git submodule: shared PSRAM/SD-card/fault-handler/board-header/
                               # ILI9486/USB-HID drivers (see "Pico-Toolset" above) -- pico_toolset_psram,
                               # pico_toolset_sdcard, pico_toolset_fault_handler, pico_toolset_ili9486,

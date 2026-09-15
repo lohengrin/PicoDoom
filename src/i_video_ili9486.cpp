@@ -112,28 +112,29 @@ pico_toolset::Ili9486 g_display;
 // of DisplayPanel by design.
 pico_toolset::DisplayPanel& g_panel = g_display;
 uint16_t g_rgb565_wire_lut[256];
-// Gamma factor applied at RGB565-LUT-build time (F3/F4 in
-// src/i_input_usbhid.cpp) -- this whole file is LCD-build-only
+// Gamma factor applied at RGB565-LUT-build time (set from the serial console,
+// src/i_serial_console.cpp; F3/F4 keys that used to tune it are freed for
+// vanilla DOOM) -- this whole file is LCD-build-only
 // (PICODOOM_VIDEO_OUTPUT=lcd), see CMakeLists.txt. Defaults to 1.4 (a
 // slight brighten -- gammatable[usegamma]'s + gamma table reads a bit dark
-// on this panel; kept as the F3/F4 baseline); pressing down to exactly 1.0
+// on this panel; kept as the baseline); pressing down to exactly 1.0
 // engages an identity fast path in rebuild_rgb565_lut() so an uncorrected
 // palette is byte-identical to the pre-gamma build.
-// Core0-owned: written by I_SetPalette()/i_video_bump_gamma(), read only --
+// Core0-owned: written by I_SetPalette()/i_video_set_gamma(), read only --
 // indirectly, via the LUT -- in I_FinishUpdate(). core1 never sees either
 // (the Phase 6 blit is pure DMA of already-converted buffers), so no
 // cross-core synchronization is needed.
 float g_gamma = 1.4f;
-// Raw PLAYPAL byte data from the last I_SetPalette() -- kept so F3/F4 can
-// rebuild the LUT at a new gamma without the engine re-handing the palette
-// over (it only calls I_SetPalette() when it itself changes the palette,
-// e.g. level start or the options-menu gamma setting).
+// Raw PLAYPAL byte data from the last I_SetPalette() -- kept so a serial
+// 'gamma' command can rebuild the LUT at a new factor without the engine
+// re-handing the palette over (it only calls I_SetPalette() when it itself
+// changes the palette, e.g. level start or the options-menu gamma setting).
 byte g_palette_cache[256 * 3];
 
 // Core0-only (see g_gamma/g_palette_cache above). Runs the cached raw
 // palette through gamma + gammatable[usegamma] into the wire-order RGB565
 // LUT I_FinishUpdate() indexes per pixel. Rebuilt wholesale on every
-// I_SetPalette() and every F3/F4 gamma change -- 256 entries, one-time
+// I_SetPalette() and every serial 'gamma' change -- 256 entries, one-time
 // cost, not per frame.
 void rebuild_rgb565_lut() {
     for (int i = 0; i < 256; ++i) {
@@ -357,37 +358,42 @@ void I_ReadScreen(byte* scr) {
     memcpy(scr, screens[0], SCREENWIDTH * SCREENHEIGHT);
 }
 
-// Live SPI pixel-clock tuning (2026-09 performance work): called from
-// src/i_input_usbhid.cpp's F1/F2 handling so the actual hardware
-// corruption ceiling can be found by hand instead of guessed from a
-// datasheet. delta_hz may be negative; clamped so it can't underflow past a
-// sane floor. pico_toolset::Ili9486::set_pixel_clock_hz() takes effect on
+// SPI pixel-clock accessors for the serial console
+// (src/i_serial_console.cpp; F1/F2 keys that used to tune this are freed for
+// vanilla DOOM). 2026-09 performance work: live tuning so the actual
+// hardware corruption ceiling can be found by hand instead of guessed from
+// a datasheet. pico_toolset::Ili9486::set_pixel_clock_hz() takes effect on
 // the next set_window() call (core1's i_video_core1_step()), not
 // immediately -- see that method's own doc comment on why calling it from
 // core0 here, while core1 runs the blit loop, needs no extra
 // synchronization.
-void i_video_bump_pixel_clock_hz(int32_t delta_hz) {
+uint32_t i_video_pixel_clock_hz(void) {
+    return g_display.pixel_clock_hz();
+}
+
+void i_video_set_pixel_clock_hz(uint32_t hz) {
     constexpr uint32_t kMinPixelClockHz = 1'000'000;
-    uint32_t cur = g_display.pixel_clock_hz();
-    uint32_t next = (delta_hz < 0 && static_cast<uint32_t>(-delta_hz) >= cur)
-        ? kMinPixelClockHz
-        : static_cast<uint32_t>(static_cast<int64_t>(cur) + delta_hz);
+    uint32_t next = hz < kMinPixelClockHz ? kMinPixelClockHz : hz;
     g_display.set_pixel_clock_hz(next);
     printf("PicoDoom: SPI pixel clock requested=%u Hz  last actual=%u Hz\n",
            static_cast<unsigned>(next), static_cast<unsigned>(g_display.pixel_clock_actual_hz()));
 }
 
-// Gamma-factor tuning (F3/F4 in src/i_input_usbhid.cpp, LCD build only):
-// adjusts the factor I_SetPalette()'s LUT was built at -- see
-// rebuild_rgb565_lut() above for what that does. Rebuilding from the cached
-// raw PLAYPAL means the engine is never involved and the new setting takes
-// effect from the very next I_FinishUpdate(); the value is echoed to the
-// serial console, same pattern as the F1/F2 pixel-clock report. delta may
-// be negative; clamped to [0.1, 10].
-void i_video_bump_gamma(float delta) {
+// Gamma-factor accessors for the serial console (src/i_serial_console.cpp;
+// F3/F4 keys that used to tune this are freed for vanilla DOOM). Adjusts the
+// factor I_SetPalette()'s LUT was built at -- see rebuild_rgb565_lut() above
+// for what that does. Rebuilding from the cached raw PLAYPAL means the
+// engine is never involved and the new setting takes effect from the very
+// next I_FinishUpdate(); the value is echoed to the serial console, same
+// pattern as the pixel-clock report. The setter clamps to [0.1, 10].
+float i_video_gamma(void) {
+    return g_gamma;
+}
+
+void i_video_set_gamma(float gamma) {
     constexpr float kMinGamma = 0.1f;
     constexpr float kMaxGamma = 10.0f;
-    g_gamma += delta;
+    g_gamma = gamma;
     if (g_gamma < kMinGamma)
         g_gamma = kMinGamma;
     else if (g_gamma > kMaxGamma)

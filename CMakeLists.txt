@@ -207,6 +207,7 @@ src/PicoDoom.cpp
 src/sd_stdio.cpp
 ${PICODOOM_VIDEO_SRC}
 src/i_input_usbhid.cpp
+src/i_serial_console.cpp
 ${PICODOOM_SOUND_SRC}
 ${DOOMSRC}
 )

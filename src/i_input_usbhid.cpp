@@ -33,22 +33,16 @@
 #ifndef PICODOOM_HDMI
 #include "i_video_core1.hpp"
 #endif
+// Pico-specific runtime tuning commands over the USB CDC -- the replacement
+// for this file's old F1/F2/F3/F4/F10/F11/F12 intercepts (now freed for
+// vanilla DOOM use, see hid_to_doom_key()'s doc comment below).
+#include "i_serial_console.hpp"
 
 extern "C" {
 #include "doomdef.h"
 #include "d_event.h"
 #include "d_main.h"
-#include "doomstat.h" // mouseSensitivity, for F10/F11's driver-level adjust below
 }
-
-#ifndef PICODOOM_HDMI
-// src/i_video_ili9486.cpp -- F1/F2 live SPI pixel-clock tuning and F3/F4
-// gamma-factor tuning below. DVI has no adjustable pixel clock (and this
-// port keeps the DVI path's brightness pipeline untouched), so these (and
-// their call sites) only exist in the LCD build.
-extern "C" void i_video_bump_pixel_clock_hz(int32_t delta_hz);
-extern "C" void i_video_bump_gamma(float delta);
-#endif
 
 #include "pico/multicore.h"
 
@@ -118,24 +112,18 @@ const uint8_t* hid_to_doom_key()
         table[0x2B] = KEY_TAB; table[0x2C] = ' ';
         table[0x2D] = KEY_MINUS; table[0x2E] = KEY_EQUALS;
         table[0x36] = ','; table[0x37] = '.'; table[0x38] = '/';
-#ifndef PICODOOM_HDMI
-        // F3/F4 (0x3C/0x3D) deliberately NOT mapped in the LCD build: they
-        // tune the gamma factor below (see the I_StartTic() block) instead
-        // of posting vanilla DOOM's KEY_F3 "load"/KEY_F4 "sound volume"
-        // (m_menu.c) -- same interception rationale as F1/F2. The HDMI build
-        // has no gamma adjustment and keeps the normal DOOM bindings.
-#else
+        // F1-F4 (0x3A-0x3D) and F10-F12 (0x43-0x45) are now plain DOOM keys: they
+        // used to be intercepted here for Pico-specific tuning (SPI pixel
+        // clock, gamma factor, mouse enable/sensitivity) until that control
+        // moved to the serial console (src/i_serial_console.cpp). Vanilla
+        // bindings they were shadowing resumed: F1 help, F2 save, F3 load,
+        // F4 sound volume, F10 quit, F11 gamma toggle (m_menu.c), F12
+        // spy-mode (doom/g_game.c).
+        table[0x3A] = KEY_F1; table[0x3B] = KEY_F2;
         table[0x3C] = KEY_F3; table[0x3D] = KEY_F4;
-#endif
         table[0x3E] = KEY_F5; table[0x3F] = KEY_F6; table[0x40] = KEY_F7; table[0x41] = KEY_F8;
         table[0x42] = KEY_F9;
-        // F1/F2 (0x3A/0x3B) and F10/F11/F12 (0x43-0x45) deliberately NOT
-        // mapped here: they're intercepted directly below instead of posted
-        // as ordinary DOOM keys. F1/F2 are live SPI pixel-clock tuning
-        // (2026-09 performance work, temporary -- shadows vanilla DOOM's F1
-        // help screen/F2 save menu while this is in the build); F10 already
-        // means "quit DOOM?" and F11 "cycle gamma" in m_menu.c, and posting
-        // both meanings for the same physical key would be confusing.
+        table[0x43] = KEY_F10; table[0x44] = KEY_F11; table[0x45] = KEY_F12;
         table[0x48] = KEY_PAUSE;
         table[0x4F] = KEY_RIGHTARROW; table[0x50] = KEY_LEFTARROW;
         table[0x51] = KEY_DOWNARROW; table[0x52] = KEY_UPARROW;
@@ -160,34 +148,13 @@ uint8_t g_prev_joy_buttons = 0;
 int g_prev_joy_x = 0;
 int g_prev_joy_y = 0;
 
-// Mouse on/off + sensitivity controls (F12/F11/F10) -- intercepted here
-// rather than posted as ordinary DOOM keys, see hid_to_doom_key()'s doc
-// comment on why F10/F11/F12 aren't in that table. "On by default if mouse
-// detected": g_mouse_enabled starts true; whether anything actually gets
-// posted also depends on the mouse's presence, so no mouse plugged in
-// already behaves as "off" without touching this flag.
+// Mouselook posting: "on by default if mouse detected" -- g_mouse_enabled
+// starts true; whether anything actually gets posted also depends on the
+// mouse's presence, so no mouse plugged in already behaves as "off" without
+// touching this flag. Toggled from the serial console (`mouse on|off`,
+// src/i_serial_console.cpp) since F10/F11/F12 went back to their vanilla
+// DOOM meanings.
 bool g_mouse_enabled = true;
-bool g_prev_f10_down = false;
-bool g_prev_f11_down = false;
-bool g_prev_f12_down = false;
-
-#ifndef PICODOOM_HDMI
-// Live SPI pixel-clock tuning (F1 up / F2 down) -- see hid_to_doom_key()'s
-// doc comment. Temporary, for finding this panel/wiring's real corruption
-// ceiling by hand (2026-09 performance work). LCD-build-only -- see the
-// I_StartTic() call site below.
-bool g_prev_f1_down = false;
-bool g_prev_f2_down = false;
-constexpr int32_t kPixelClockStepHz = 1'000'000;
-
-// Gamma-factor tuning (F3 down / F4 up) -- see the I_StartTic() block below
-// and i_video_bump_gamma() (src/i_video_ili9486.cpp). Also LCD-build-only:
-// i_video_bump_gamma() has no caller (and no definition) in the HDMI build.
-// 0.1 per press, same edge-triggered handling as F1/F2.
-bool g_prev_f3_down = false;
-bool g_prev_f4_down = false;
-constexpr float kGammaStep = 0.1f;
-#endif
 
 void post_key(int doomkey, bool down)
 {
@@ -223,8 +190,25 @@ extern "C" void usb_hid_core0_init(void)
 }
 #endif
 
+// Mouselook-posting accessors for the serial console (src/i_serial_console.cpp)
+// -- the F12 toggle that used to drive g_mouse_enabled is gone.
+extern "C" bool i_input_mouse_enabled(void)
+{
+    return g_mouse_enabled;
+}
+
+extern "C" void i_input_set_mouse_enabled(bool enabled)
+{
+    g_mouse_enabled = enabled;
+}
+
 extern "C" void I_StartTic(void)
 {
+    // Pico-specific runtime tuning (serial console, src/i_serial_console.cpp)
+    // -- the F1/F2/F3/F4/F10/F11/F12 intercepts that used to do this are
+    // gone; poll their replacement here, once per tic.
+    i_serial_console_poll();
+
     int i;
     bool ctrl, shift, alt;
     const uint8_t* keymap = hid_to_doom_key();
@@ -277,69 +261,6 @@ extern "C" void I_StartTic(void)
     if (alt != g_prev_alt) {
         post_key(KEY_RALT, alt);
         g_prev_alt = alt;
-    }
-
-#ifndef PICODOOM_HDMI
-    // Live SPI pixel-clock tuning (F1 up / F2 down) -- edge-triggered, same
-    // pattern as the mouse controls below. See hid_to_doom_key()'s doc
-    // comment and i_video_bump_pixel_clock_hz()'s (src/i_video_ili9486.cpp).
-    // DVI has no adjustable pixel clock -- LCD-build-only.
-    {
-        bool f1_down = g_usb_hid.is_key_down(0x3A);
-        bool f2_down = g_usb_hid.is_key_down(0x3B);
-
-        if (f1_down && !g_prev_f1_down)
-            i_video_bump_pixel_clock_hz(kPixelClockStepHz);
-        if (f2_down && !g_prev_f2_down)
-            i_video_bump_pixel_clock_hz(-kPixelClockStepHz);
-
-        g_prev_f1_down = f1_down;
-        g_prev_f2_down = f2_down;
-
-        // Gamma-factor tuning (F3 down / F4 up) -- edge-triggered like the
-        // F1/F2 block above. Shadows vanilla DOOM's KEY_F3 "load"/KEY_F4
-        // "sound volume" in this build, see hid_to_doom_key()'s doc comment.
-        {
-            bool f3_down = g_usb_hid.is_key_down(0x3C);
-            bool f4_down = g_usb_hid.is_key_down(0x3D);
-
-            if (f3_down && !g_prev_f3_down)
-                i_video_bump_gamma(-kGammaStep);
-            if (f4_down && !g_prev_f4_down)
-                i_video_bump_gamma(kGammaStep);
-
-            g_prev_f3_down = f3_down;
-            g_prev_f4_down = f4_down;
-        }
-    }
-#endif
-
-    // Mouse toggle (F12) / sensitivity (F11 up, F10 down) -- edge-triggered
-    // (fire once per physical press, not once per poll while held), and
-    // consumed here rather than posted as DOOM keys (see hid_to_doom_key()).
-    {
-        bool f10_down = g_usb_hid.is_key_down(0x43);
-        bool f11_down = g_usb_hid.is_key_down(0x44);
-        bool f12_down = g_usb_hid.is_key_down(0x45);
-
-        if (f12_down && !g_prev_f12_down) {
-            g_mouse_enabled = !g_mouse_enabled;
-            printf("PicoDoom: mouse %s\n", g_mouse_enabled ? "enabled" : "disabled");
-        }
-        if (f11_down && !g_prev_f11_down) {
-            if (mouseSensitivity < 9)
-                mouseSensitivity++;
-            printf("PicoDoom: mouse sensitivity %d\n", mouseSensitivity);
-        }
-        if (f10_down && !g_prev_f10_down) {
-            if (mouseSensitivity > 0)
-                mouseSensitivity--;
-            printf("PicoDoom: mouse sensitivity %d\n", mouseSensitivity);
-        }
-
-        g_prev_f10_down = f10_down;
-        g_prev_f11_down = f11_down;
-        g_prev_f12_down = f12_down;
     }
 
     {

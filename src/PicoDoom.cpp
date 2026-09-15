@@ -101,14 +101,14 @@ int main(void)
 #endif
 
     // clk_peri (the SPI baud generator's clock source, see
-    // src/i_video_ili9486.cpp's F1/F2 tuning) does NOT automatically follow
+    // src/i_video_ili9486.cpp plus the serial console's 'pclk' command) does NOT automatically follow
     // clk_sys by pico-sdk default: set_sys_clock_khz()/set_sys_clock_pll()
     // only re-source it from clk_sys when the SDK is built with
     // PICO_CLOCK_ADJUST_PERI_CLOCK_WITH_SYS_CLOCK (off here) -- otherwise
     // it's left on CLKSRC_PLL_USB, a fixed 48MHz regardless of clk_sys
     // (clocks.c). Confirmed on real hardware (2026-09): the clk_sys
     // overclock above measurably sped up PSRAM (memcpy/convert both
-    // dropped) but F1/F2's live pixel-clock requests plateaued at exactly
+    // dropped) but the pixel-clock requests plateaued at exactly
     // 24MHz no matter how high requested -- clk_peri really was still stuck
     // at 48MHz (next achievable SPI divider step up from 24MHz is 48MHz
     // itself, nothing in between), unaffected by the clk_sys change.
