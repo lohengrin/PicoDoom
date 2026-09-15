@@ -35,15 +35,17 @@
 // converted to a float gain here instead of the reference driver's 32KB
 // `vol_lookup` table (unnecessary once mixing in float, and this target's
 // SRAM has no room to spare for it -- see src/i_video_dvi.cpp's own SRAM
-// history). Mixed once per tic (1260 samples at 44100Hz/35Hz, exact) from
-// I_SubmitSound() -- not I_UpdateSound(), despite that function's more
-// obviously-matching name: doom/doomdef.h unconditionally `#define SNDSERV
-// 1` (true for every build, including the original Linux target), which
-// compiles out doom/d_main.c's `#ifndef SNDSERV I_UpdateSound(); #endif`
-// call entirely, while its neighboring `#ifndef SNDINTR I_SubmitSound();
-// #endif` always runs (SNDINTR is never defined) -- confirmed the hard way
-// on real hardware (see I_SubmitSound()'s own doc comment below). No
-// d_main.c change needed either way.
+// history). Mixed from I_SubmitSound() -- not I_UpdateSound(), despite that
+// function's more obviously-matching name: doom/doomdef.h unconditionally
+// `#define SNDSERV 1` (true for every build, including the original Linux
+// target), which compiles out doom/d_main.c's `#ifndef SNDSERV
+// I_UpdateSound(); #endif` call entirely, while its neighboring
+// `#ifndef SNDINTR I_SubmitSound(); #endif` always runs (SNDINTR is never
+// defined) -- confirmed the hard way on real hardware (see I_SubmitSound()'s
+// own doc comment below). No d_main.c change needed either way. Note the
+// mix is wall-clock-paced (time_us_64), not 35Hz-tic-paced -- D_DoomLoop
+// calls I_SubmitSound() once per render-bound outer iteration (see
+// mix_tic()), while the DVI consumer drains at a fixed 44.1kHz.
 //
 // Pushed into the HDMI audio ring (dvi.h's audio_ring_t, embedded in the
 // same dvi_inst src/i_video_dvi.cpp's core1 already drives) non-blocking,
@@ -54,6 +56,7 @@
 #include "dvi.h"
 #include "audio_ring.h"
 #include "i_video_dvi.hpp"
+#include "pico/time.h"
 #include "pico_toolset/psram.h"
 
 extern "C" {
@@ -82,9 +85,20 @@ namespace {
 
 constexpr int kNumVoices = 8;
 constexpr int kMixRate = 44100;
-// 44100/35 (doomdef.h's TICRATE) = 1260 exactly -- no drift-correction
-// needed between tic cadence and sample cadence.
+// Nominal samples per 35Hz game tic -- 44100/35 (doomdef.h's TICRATE) = 1260
+// exactly. Kept as the reference cadence only: actual per-call production is
+// wall-clock-paced (see mix_tic()), so this stays meaningful as documentation
+// even though no code path forces exactly one tic's worth per call.
 constexpr int kSamplesPerTic = kMixRate / TICRATE;
+// Largest single I_SubmitSound() production, ~50ms of audio at kMixRate.
+// The DVI consumer drains at a hard 44.1kHz from core1's per-scanline IRQ,
+// but D_DoomLoop calls I_SubmitSound() once per outer-loop iteration, which
+// is render-bound (no I_WaitVBL paces it) and drops well below 35Hz on this
+// hardware -- so producing a fixed 1260/call would under-supply the ring and
+// leave it near-empty/choppy. mix_tic() instead produces elapsed-wall-ms's
+// worth of samples per call; this cap bounds the burst after a stall
+// (e.g. a load) so it clips rather than flooding a near-space-free ring.
+constexpr int kMaxSamplesPerCall = kMixRate / 20; // 2205, ~50ms
 
 // HDMI audio ring storage -- plain SRAM (.bss), not PSRAM: the consumer
 // side (dvi.c's per-scanline DMA IRQ, on core1) reads this via a plain CPU
@@ -95,11 +109,12 @@ constexpr int kSamplesPerTic = kMixRate / TICRATE;
 constexpr uint32_t kRingFrames = 2048;
 alignas(4) audio_sample_t g_ring_storage[kRingFrames];
 
-// Per-tic float mix accumulators -- core0-only (this file's own
-// I_SubmitSound()/mix_tic() produce them, then copy into the SRAM ring
-// above), so PSRAM is fine here: no cross-core CPU-load concern, just
-// saving ~10KB of this board's scarce SRAM (see src/i_video_dvi.cpp's own
-// SRAM-budget history for why that matters).
+// Mix accumulators (sized for the largest possible single call,
+// kMaxSamplesPerCall) -- core0-only (this file's own I_SubmitSound()/
+// mix_tic() produce them, then copy into the SRAM ring above), so PSRAM is
+// fine here: no cross-core CPU-load concern, just saving ~10KB of this
+// board's scarce SRAM (see src/i_video_dvi.cpp's own SRAM-budget history
+// for why that matters).
 float* g_mix_l = nullptr;
 float* g_mix_r = nullptr;
 
@@ -172,13 +187,34 @@ void ensure_ring_configured() {
 
 void mix_tic() {
     ensure_ring_configured();
-    std::fill(g_mix_l, g_mix_l + kSamplesPerTic, 0.0f);
-    std::fill(g_mix_r, g_mix_r + kSamplesPerTic, 0.0f);
+
+    // Wall-clock paced production, not 35Hz-tic paced: D_DoomLoop calls
+    // I_SubmitSound() once per outer-loop iteration, which with no I_WaitVBL
+    // is render-bound and runs slower than TICRATE on this hardware, while
+    // the DVI consumer drains at a fixed 44.1kHz from core1's per-scanline
+    // IRQ. Producing the elapsed-wall time's worth of samples per call keeps
+    // the producer matched to that real-time rate at any loop speed -- a
+    // 25Hz loop (40ms/iteration) supplies ~1764 frames/call instead of a
+    // starved 1260. Ceiling rounding (not round-to-nearest) so the producer
+    // can never systematically fall behind the consumer; the excess
+    // sub-sample is bounded by the ring's ~46ms of buffering. Cap the burst
+    // after a stall so a long hitch clips instead of flooding a near-full
+    // ring (kMaxSamplesPerCall, ~50ms < ring capacity).
+    static uint64_t s_last_mix_us = 0;
+    uint64_t now_us = time_us_64();
+    const uint64_t elapsed_us = s_last_mix_us ? now_us - s_last_mix_us : 0;
+    s_last_mix_us = now_us;
+    int n = static_cast<int>((elapsed_us * static_cast<uint64_t>(kMixRate) + 999'999u) / 1'000'000u);
+    if (n > kMaxSamplesPerCall)
+        n = kMaxSamplesPerCall;
+
+    std::fill(g_mix_l, g_mix_l + n, 0.0f);
+    std::fill(g_mix_r, g_mix_r + n, 0.0f);
 
     for (Voice& v : g_voices) {
         if (!v.active)
             continue;
-        for (int i = 0; i < kSamplesPerTic; ++i) {
+        for (int i = 0; i < n; ++i) {
             uint32_t idx = v.pos_frac >> 16;
             if (idx + 1 >= v.length) {
                 v.active = false;
@@ -198,9 +234,9 @@ void mix_tic() {
         return;
     audio_ring_t& ring = g_dvi->audio_ring;
     uint32_t free_frames = audio_ring_get_write_size(&ring);
-    uint32_t to_write = std::min<uint32_t>(kSamplesPerTic, free_frames);
+    uint32_t to_write = std::min<int>(n, static_cast<int>(free_frames));
     if (to_write == 0)
-        return; // ring full -- drop this tic's audio, never block the game loop
+        return; // ring full -- drop this batch, never block the game loop
 
     audio_sample_t* buf = audio_ring_get_buffer(&ring);
     uint32_t wpos = audio_ring_get_write_offset(&ring);
@@ -241,8 +277,8 @@ void I_InitSound(void) {
     // ensure_ring_configured()'s doc comment for why.
     g_dvi = i_video_dvi_instance();
 
-    g_mix_l = static_cast<float*>(pico_toolset::psram_malloc(kSamplesPerTic * sizeof(float)));
-    g_mix_r = static_cast<float*>(pico_toolset::psram_malloc(kSamplesPerTic * sizeof(float)));
+    g_mix_l = static_cast<float*>(pico_toolset::psram_malloc(kMaxSamplesPerCall * sizeof(float)));
+    g_mix_r = static_cast<float*>(pico_toolset::psram_malloc(kMaxSamplesPerCall * sizeof(float)));
     if (!g_mix_l || !g_mix_r)
         I_Error(const_cast<char*>("I_InitSound: failed to allocate mix buffers"));
 }
