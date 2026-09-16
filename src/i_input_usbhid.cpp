@@ -202,6 +202,85 @@ extern "C" void i_input_set_mouse_enabled(bool enabled)
     g_mouse_enabled = enabled;
 }
 
+// Boot-menu glue (Phase 4, src/wad_menu.cpp). The LVGL menu needs the same
+// USB host stack the game uses: the menu's indevs (src/lvgl_indev.cpp) read
+// its keyboard/mouse/gamepad state directly.
+extern "C" pico_toolset::UsbHidHost& i_input_usb_hid(void)
+{
+    return g_usb_hid;
+}
+
+// Services the USB host stack from the boot menu's event loop. LCD build:
+// no-op -- core1 (core1_entry above) already calls UsbHidHost::task() every
+// loop iteration, so the menu must not double-poll the stack from core0.
+// HDMI build: core0 owns the stack (this file's whole PICODOOM_HDMI
+// arrangement), and the menu loop has no tic cadence to hang a poll off --
+// so it calls this directly instead of relying on I_StartTic().
+extern "C" void i_input_menu_usb_task(void)
+{
+#ifdef PICODOOM_HDMI
+    pico_toolset::UsbHidHost::task();
+#endif
+}
+
+// Re-baselines every edge-tracking latch in this file to the current HID
+// state, so a key/button still held when the user confirms (or cancels) the
+// boot menu does not get re-posted as a fresh press into the first tics of
+// gameplay -- the user is literally still holding Enter from the menu, and
+// without this, that same press would fire DOOM's "use" (and the menu Enter)
+// on entry. Also drains any accumulated mouse delta. Called once from
+// src/wad_menu.cpp, on every exit path (selection or cancel).
+extern "C" void i_input_reset_menu_input(void)
+{
+    int dx = 0, dy = 0;
+    g_usb_hid.consume_mouse_delta(dx, dy);
+
+    for (int i = 0x04; i < 0x60; ++i)
+        g_prev_key_down[i] = g_usb_hid.is_key_down(static_cast<uint8_t>(i));
+
+    constexpr uint8_t kModLeftCtrl = 0x01, kModRightCtrl = 0x10;
+    constexpr uint8_t kModLeftShift = 0x02, kModRightShift = 0x20;
+    constexpr uint8_t kModLeftAlt = 0x04, kModRightAlt = 0x40;
+    g_prev_ctrl = g_usb_hid.is_modifier_down(kModLeftCtrl | kModRightCtrl);
+    g_prev_shift = g_usb_hid.is_modifier_down(kModLeftShift | kModRightShift);
+    g_prev_alt = g_usb_hid.is_modifier_down(kModLeftAlt | kModRightAlt);
+
+    pico_toolset::UsbHidHost::MouseState mouse = g_usb_hid.mouse_state();
+    g_prev_mouse_connected = mouse.present;
+    g_prev_mouse_buttons = mouse.present ? static_cast<uint8_t>((mouse.left_button ? 1 : 0) |
+                                                                (mouse.right_button ? 2 : 0) |
+                                                                (mouse.middle_button ? 4 : 0))
+                                         : 0;
+
+    pico_toolset::GamepadState pad = g_usb_hid.gamepad_state(0);
+    g_prev_gamepad_connected = pad.present;
+    g_prev_joy_buttons = 0;
+    g_prev_joy_x = 0;
+    g_prev_joy_y = 0;
+    if (pad.present) {
+        // Same sign/button derivation I_StartTic() uses -- match it exactly so
+        // the next ev_joystick edge compares against the current reality.
+        constexpr int kStickCenter = 128;
+        constexpr int kDeadzone = 40;
+        int lx = static_cast<int>(pad.lx) - kStickCenter;
+        int ly = static_cast<int>(pad.ly) - kStickCenter;
+        int joyx = (lx > kDeadzone) ? 1 : (lx < -kDeadzone) ? -1 : 0;
+        int joyy = (ly > kDeadzone) ? 1 : (ly < -kDeadzone) ? -1 : 0;
+        if (pad.down(pico_toolset::kBtLeft)) joyx = -1;
+        else if (pad.down(pico_toolset::kBtRight)) joyx = 1;
+        if (pad.down(pico_toolset::kBtUp)) joyy = -1;
+        else if (pad.down(pico_toolset::kBtDown)) joyy = 1;
+        g_prev_joy_x = joyx;
+        g_prev_joy_y = joyy;
+        g_prev_joy_buttons = static_cast<uint8_t>((pad.down(pico_toolset::kBtA) ? 1 : 0) |
+                                                   (pad.down(pico_toolset::kBtB) ? 2 : 0) |
+                                                   (pad.down(pico_toolset::kBtX) ? 4 : 0) |
+                                                   (pad.down(pico_toolset::kBtY) ? 8 : 0));
+    }
+
+    g_prev_connected = g_usb_hid.connected_keyboard_count() > 0;
+}
+
 extern "C" void I_StartTic(void)
 {
     // Pico-specific runtime tuning (serial console, src/i_serial_console.cpp)

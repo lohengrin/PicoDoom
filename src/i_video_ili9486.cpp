@@ -100,6 +100,13 @@ extern "C" char __bss_end__;
 
 namespace {
 pico_toolset::Ili9486 g_display;
+// Once-guard: I_InitGraphics() is invoked by both the boot WAD-selection
+// menu (Phase 4, src/wad_menu.cpp) and the engine's own startup
+// (D_DoomMain() -> I_InitGraphics) -- the second call must be a no-op: the
+// panel was already brought up and the blit buffers already allocated (and
+// g_screen_buf's SRAM/PSRAM fallback already decided). Without it, the boot
+// menu would work but the game boot would re-init over a live core1.
+bool g_graphics_init_done = false;
 // Routes every call this file makes that's part of the shared
 // pico_toolset::DisplayPanel contract (set_window/write_pixels/
 // start_pixels_dma/pixels_busy/finish_pixels_dma/end_write/fill_solid)
@@ -259,6 +266,10 @@ void report_stats_if_due(uint64_t now_us) {
 extern "C" {
 
 void I_InitGraphics(void) {
+    if (g_graphics_init_done)
+        return;
+    g_graphics_init_done = true;
+
     // core1 is already running PicoUsbKeyboard's loop by this point (started
     // from src/PicoDoom.cpp before D_DoomMain()) and will start calling
     // i_video_core1_step() immediately -- but g_blit_buf_free starts all-true
@@ -400,6 +411,15 @@ void i_video_set_gamma(float gamma) {
         g_gamma = kMaxGamma;
     rebuild_rgb565_lut();
     printf("PicoDoom: gamma %.2f\n", g_gamma);
+}
+
+// LCD-display accessor for the boot WAD-selection menu (Phase 4,
+// src/wad_menu.cpp): hands the concrete pico_toolset::Ili9486 to the LVGL
+// display driver (src/lvgl_display_lcd.cpp) and to the touch-screen init
+// (which reuses this panel's SPI instance for the XPT2046, LCD build only).
+// Boot-menu-only, core0; the game's own core1 blit never goes through it.
+pico_toolset::Ili9486& i_video_lcd_display(void) {
+    return g_display;
 }
 
 // I_StartTic lives in src/i_input_usbhid.cpp (Phase 3, USB-PIO keyboard).

@@ -64,7 +64,6 @@ pico_sdk_init()
 # SSD1306/XPT2046/I2S_AUDIO/RESET_BUTTONS/SCREEN are unused by this project
 # -- off to skip building them, regardless of output driver.
 set(PICO_TOOLSET_BUILD_SSD1306 OFF CACHE BOOL "" FORCE)
-set(PICO_TOOLSET_BUILD_XPT2046 OFF CACHE BOOL "" FORCE)
 set(PICO_TOOLSET_BUILD_I2S_AUDIO OFF CACHE BOOL "" FORCE)
 set(PICO_TOOLSET_BUILD_RESET_BUTTONS OFF CACHE BOOL "" FORCE)
 set(PICO_TOOLSET_BUILD_SCREEN OFF CACHE BOOL "" FORCE)
@@ -74,10 +73,18 @@ if(PICODOOM_VIDEO_OUTPUT STREQUAL "hdmi")
     # HDMI data-island digital audio -- on from Phase B (SFX) onward, see
     # docs/HDMI_PLAN.md's phased rollout and src/i_sound_dvi.cpp.
     set(PICO_TOOLSET_DVI_HDMI_AUDIO ON CACHE BOOL "" FORCE)
+    # XPT2046 touch: the touchscreen controller lives on the SPI LCD panel's
+    # MISO line (Waveshare 3.5" RPi LCD (A)) -- the HDMI build has no such
+    # panel, so no touch driver (see src/wad_menu.cpp's #ifndef PICODOOM_HDMI).
+    set(PICO_TOOLSET_BUILD_XPT2046 OFF CACHE BOOL "" FORCE)
 else()
     set(PICO_TOOLSET_BUILD_ILI9486 ON CACHE BOOL "" FORCE)
     set(PICO_TOOLSET_BUILD_DVI_HDMI OFF CACHE BOOL "" FORCE)
     set(PICO_TOOLSET_DVI_HDMI_AUDIO OFF CACHE BOOL "" FORCE)
+    # XPT2046 (SPI touchscreen on the LCD panel) -- on for this build so the
+    # boot WAD-selection menu (src/wad_menu.cpp, Phase 4) can be driven by
+    # touch as well as mouse/keyboard/joystick.
+    set(PICO_TOOLSET_BUILD_XPT2046 ON CACHE BOOL "" FORCE)
 endif()
 # Doom's WAD loader (doom/w_wad.c) seeks around inside files via libc stdio,
 # so this project needs the sdcard component's POSIX syscall shim, not just
@@ -85,6 +92,49 @@ endif()
 # src/sd_stdio.cpp.
 set(PICO_TOOLSET_SDCARD_STDIO ON CACHE BOOL "" FORCE)
 add_subdirectory(third_party/pico-toolset)
+
+# ---------------------------------------------------------------------------
+# LVGL for the boot WAD-selection menu (Phase 4, src/wad_menu.cpp) -- fetched
+# exactly the way TOM6809 does it (same repository, same tag, same flags;
+# see ~/Dev/TOM6809/pico/CMakeLists.txt's WAVESHARE_LVGL_UI_SUPPORT block).
+# LV_CONF_PATH must be set BEFORE FetchContent_MakeAvailable(): LVGL's own
+# env_support/cmake/custom.cmake reads it while configuring the `lvgl`
+# target itself, and also adds that file's directory to the `lvgl` target's
+# PUBLIC include dirs -- which propagates to PicoDoom automatically via the
+# target_link_libraries(... lvgl::lvgl ...) below, so no separate
+# include-directory wiring is needed on our side. This project's engine
+# sources must not see LVGL's compile history (they're C90), but the menu
+# sources are C++ (src/*.cpp, C++20) and the lvgl target is C-only --
+# including lvgl.h from C++ is fine (its headers extern-C-wrap their
+# declarations).
+include(FetchContent)
+set(LV_CONF_PATH "${CMAKE_CURRENT_SOURCE_DIR}/src/lv_conf.h" CACHE STRING "" FORCE)
+# LVGL's own CMakeLists.txt builds its examples/demos libraries by default
+# (hundreds of extra .c files, none of which this firmware calls) --
+# disabled, pure build-time/flash waste otherwise.
+set(LV_CONF_BUILD_DISABLE_EXAMPLES ON CACHE BOOL "" FORCE)
+set(LV_CONF_BUILD_DISABLE_DEMOS ON CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    lvgl
+    GIT_REPOSITORY https://github.com/lvgl/lvgl.git
+    GIT_TAG v9.2.2
+)
+FetchContent_MakeAvailable(lvgl)
+
+# Boot-menu sources, common to both outputs, plus the per-output LVGL display
+# driver (LCD: blit onto the same pico_toolset::Ili9486 the game shares;
+# HDMI: write g_framebuf, which core1's DVI encoder scans out).
+set(PICODOOM_MENU_SRC
+    src/lvgl_mem_pool.cpp
+    src/lvgl_indev.cpp
+    src/wad_boot.cpp
+    src/wad_menu.cpp
+)
+if(PICODOOM_VIDEO_OUTPUT STREQUAL "lcd")
+    list(APPEND PICODOOM_MENU_SRC src/lvgl_display_lcd.cpp)
+else()
+    list(APPEND PICODOOM_MENU_SRC src/lvgl_display_dvi.cpp)
+endif()
 
 SET(DOOMSRC
 doom/doomdef.c
@@ -209,6 +259,7 @@ ${PICODOOM_VIDEO_SRC}
 src/i_input_usbhid.cpp
 src/i_serial_console.cpp
 ${PICODOOM_SOUND_SRC}
+${PICODOOM_MENU_SRC}
 ${DOOMSRC}
 )
 
@@ -260,9 +311,11 @@ target_link_libraries(PicoDoom
     pico_toolset_fault_handler
     $<$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},lcd>:pico_toolset_ili9486>
     $<$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},hdmi>:pico_toolset_dvi_hdmi>
+    $<$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},lcd>:pico_toolset_xpt2046>
     pico_toolset_usb_hid
     pico_multicore
     hardware_watchdog
+    lvgl::lvgl
 )
 
 target_include_directories(PicoDoom PRIVATE

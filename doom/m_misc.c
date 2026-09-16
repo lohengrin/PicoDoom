@@ -220,6 +220,13 @@ char*		mousedev;
 
 extern char*	chat_macros[];
 
+#ifdef PICO
+// Phase 4: last WAD chosen from the boot WAD-selection menu
+// (src/wad_boot.cpp); M_SaveDefaults()/M_LoadDefaults() persist it as
+// `picodoom_lastwad` so the menu can pre-highlight it on next boot.
+extern char*	pico_last_wad;
+#endif
+
 
 
 typedef struct
@@ -282,6 +289,7 @@ default_t	defaults[] =
     {"key_use",&key_use, ' '},
     {"key_strafe",&key_strafe, KEY_RALT},
     {"key_speed",&key_speed, KEY_RSHIFT},
+    {"picodoom_lastwad", (int *) &pico_last_wad, (int) ""},
 #endif
 
 #ifdef LINUX

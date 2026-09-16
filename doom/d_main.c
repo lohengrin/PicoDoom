@@ -646,6 +646,27 @@ void IdentifyVersion(void)
 		return;
 	}
 
+	// Phase 4: the WAD-menu choice (src/wad_boot.cpp) takes priority over
+	// the fixed-name scan below -- it can name any IWAD on the uSD root,
+	// and pico_wad_gamemode() sniffs the WAD's own lump directory for the
+	// right GameMode_t (a non-canonically-named IWAD must still pick the
+	// correct convert). Fall-through (menu cancelled/skipped) leaves this
+	// exactly as upstream, fixed-name scan and all.
+#ifdef PICO
+	{
+		extern const char *pico_selected_wad(void);
+		extern int pico_wad_gamemode(const char *name);
+
+		const char *pico_sel = pico_selected_wad();
+		if (pico_sel && pico_sel[0] && !access(pico_sel, R_OK))
+		{
+			gamemode = pico_wad_gamemode(pico_sel);
+			D_AddFile((char *)pico_sel);
+			return;
+		}
+	}
+#endif
+
 	if (!access(doom2fwad, R_OK))
 	{
 		gamemode = commercial;

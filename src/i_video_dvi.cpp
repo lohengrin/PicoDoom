@@ -117,6 +117,13 @@ extern "C" char __bss_end__;
 
 namespace {
 
+// Once-guard: I_InitGraphics() is invoked by both the boot WAD-selection
+// menu (Phase 4, src/wad_menu.cpp) and the engine's own startup
+// (D_DoomMain() -> I_InitGraphics) -- the second call must be a no-op:
+// dvi_init()/core1 relaunch over an already-running encoder would wedge the
+// TMDS pipeline (the first core1 is already scanning out g_framebuf).
+bool g_graphics_init_done = false;
+
 // Canvas pixel dimensions -- see file header's scaling rationale.
 // DVI_VERTICAL_REPEAT (dvi_config_defs.h, default 2) doubles each canvas
 // row to 2 physical scanlines, so kCanvasH=240 produces the full 480-line
@@ -288,7 +295,23 @@ extern "C" {
 
 struct dvi_inst* i_video_dvi_instance(void) { return &g_dvi; }
 
+// g_framebuf accessors for the boot WAD-selection menu (Phase 4,
+// src/wad_menu.cpp): the LVGL display driver for this build
+// (src/lvgl_display_dvi.cpp, 320x240 canvas == g_framebuf 1:1 -- see that
+// file) writes native-endian RGB565 straight into the same buffer core1's
+// DVI encoder re-scans at 60Hz. Boot-menu-only, core0 (this file already
+// guarantees the encoder is the only other reader).
+uint16_t* i_video_dvi_framebuf(void) { return g_framebuf; }
+
+int i_video_dvi_width(void) { return kCanvasW; }
+
+int i_video_dvi_height(void) { return kCanvasH; }
+
 void I_InitGraphics(void) {
+    if (g_graphics_init_done)
+        return;
+    g_graphics_init_done = true;
+
     g_dvi.timing = &dvi_timing_640x480p_60hz;
     // pico_sock_cfg (common_dvi_pin_configs.h): pins_tmds={36,34,32},
     // pins_clk=38 -- this board's actual onboard TMDS connector pins

@@ -875,7 +875,75 @@ straight off a GPIO, no USB) instead of USB Audio Class.
   instructions, controls, current status, pointers to docs/PLAN.md and
   AGENTS.md for detail.
 
-## Demo/gameplay freeze investigation (2026-09, ongoing)
+## Phase 6 — Boot WAD-selection menu (LVGL v9.2.2, 2026-09, ⏳ not yet hardware-tested)
+
+A boot-time menu (shown once, from `src/PicoDoom.cpp` between USB-host init and
+`D_DoomMain()`), so a card full of WADs isn't limited to whichever one matches the
+engine's fixed-name scan (`doom1.wad`/`doom.wad`/`doomu.wad`/`plutonia.wad`/`tnt.wad`/
+`doom2.wad`/`doom2f.wad`). It lists every IWAD on the uSD root, the user picks one
+(touch / mouse / keyboard / gamepad), the last choice is remembered in `default.cfg`
+and pre-highlighted next boot, and a visible 30-second countdown auto-starts the
+persisted pick unless any input arrives first. Esc / the Skip button / gamepad B all
+cancel -> the engine falls through to its fixed-name scan exactly as before.
+
+- **LVGL, not TOM6809's widget code, but TOM6809's wiring.** Same repo/tag/build
+  recipe as TOM6809's `WAVESHARE_LVGL_UI_SUPPORT` block (`lvgl` v9.2.2 via
+  `FetchContent`, `LV_CONF_PATH` forced to `src/lv_conf.h`, examples/demos disabled).
+  `src/lv_conf.h` is a copy of TOM6809's with the fonts reduced to Montserrat 14/22/28
+  and dark theme forced on. LVGL's heap is PSRAM-backed via `LV_MEM_POOL_ALLOC`
+  (`src/lvgl_mem_pool.cpp`, `lvgl_mem_pool()` = `psram_malloc` else `malloc`, mirroring
+  TOM6809's `PsramLvglPool.cpp`) -- safe because the menu is core0-only, unlike the
+  core1-touched PSRAM buffers the game keeps in SRAM. Verified against the fetched
+  v9.2.2 headers before writing (a `lv_event_get_key()` that doesn't exist, etc. --
+  ESC's key value comes from `lv_indev_get_key(lv_indev_active())`).
+- **Displays.** LCD build: `src/lvgl_display_lcd.cpp` drives this project's own
+  `pico_toolset::Ili9486` (`i_video_lcd_display()`) at full 480x320, flush byte-swaps
+  RGB565 to big-endian wire order like the game blit does, 40-row PSRAM tile buffer
+  (38,400 B). HDMI build: `src/lvgl_display_dvi.cpp` renders a 320x240 canvas that IS
+  `g_framebuf` 1:1 (native-endian row memcpy, no fold, no swap -- deliberately NOT
+  TOM6809's 640x480 fold driver, because `g_framebuf` is only 320 wide and the encoder
+  doubles axes), 40-row PSRAM buffer (25,600 B). Both call `lv_display_flush_ready`.
+  `I_InitGraphics()` got a static once-guard in both video drivers (`src/i_video_ili9486.cpp`,
+  `src/i_video_dvi.cpp`) because the menu calls it before `D_DoomMain()` does -- the
+  second call must be a no-op (a DVI re-`dvi_init()` mid-boot wedges the TMDS lane).
+- **Input.** `src/lvgl_indev.cpp`: pointer+mouse (scales the host's canonical 640x480
+  cursor to the canvas; visible "+" Montserrat-28 crosshair -- no Font-Awesome icon
+  font here), pointer+touch (LCD build only; `Xpt2046Calibration` defaults measured on
+  this exact panel, `swap_axes=true`, mapped straight into panel pixels), keypad
+  (keyboard HID usages -> arrows/Enter/Esc/Tab, gamepad D-pad/stick/A/B/Start
+  fallback). All three set `g_input_seen` on any real input, which stops the menu's
+  auto-start countdown (the menu then clears it). Gamepad navigation rides vanilla
+  LVGL `lv_group` -- no per-button input glue.
+- **Engine handoff.** `d_main.c` `IdentifyVersion()` gets a `#ifdef PICO` block, before
+  the fixed-name scan: if the menu picked a WAD and it's `access()`ible,
+  `gamemode = pico_wad_gamemode(sel); D_AddFile(sel); return;`. The gamemode is
+  sniffed by `src/wad_boot.cpp` reading the WAD's own lump directory in bounded
+  256-entry batches (Freedoom2 has ~19k lumps -- no whole-dir malloc at boot):
+  MAP01 -> commercial; else E4M1 -> retail; E3M1 -> registered; E1M1 -> shareware;
+  nothing -> commercial. IWADs on the menu are magic-checked (`IWAD` header). NOT
+  `-file` -- shareware builds `I_Error()` on `-file` (d_main.c).
+- **`default.cfg` persistence.** `m_misc.c` gets a `#ifdef PICO`
+  `{"picodoom_lastwad", (int*)&pico_last_wad, (int)""}` defaults[] entry plus the
+  extern (`char* pico_last_wad`, defined in `src/wad_boot.cpp`) -- so on clean quit
+  `M_SaveDefaults()` writes it (the default value is a valid pointer, required because
+  `M_SaveDefaults` dereferences unconditionally). The menu writes/rewrites
+  `default.cfg` itself at select time (replace-or-append the key) so a power-cut/boot
+  still pre-highlights the remembered WAD even without a clean `I_Quit`. Layout matches
+  what `M_LoadDefaults()` parses (`key\t\t"value"`).
+- **Exit hygiene.** `src/i_input_usbhid.cpp` gains `i_input_reset_menu_input()`,
+  called on every menu exit path: drains accumulated mouse delta and re-baselines
+  every edge latch (`g_prev_*` keyboard/modifiers/mouse/gamepad) to current HID state,
+  so the Enter still held to confirm the menu (or a ghost from enumeration) doesn't
+  fire `ev_keydown` into the first gameplay tics as "use". Servicing the USB stack
+  during the menu: LCD build no-op (core1 already polls `UsbHidHost::task()` in its
+  loop); HDMI build `i_input_menu_usb_task()` polls it from the menu's pump.
+- **Build/test status:** both `build/` (LCD) and a new `build-hdmi/`
+  (`-DPICODOOM_VIDEO_OUTPUT=hdmi`) configure and link cleanly
+  (SDK 2.3.1, LVGL fetched into each build's `_deps/`). ⏳ **Not yet hardware-tested**
+  -- first flash should exercise: menu appears over the boot black screen, buttons
+  list every IWAD on the card, keyboard/d-pad navigate + Enter launches, touch taps,
+  auto-start after 30s, `default.cfg` is written with the pick and pre-highlighted on
+  the next boot, Skip/Esc falls through to the fixed-name scan.
 
 Reproducible silent freeze, first seen during demo autoplay, MAP05
 (`demo1`, skill 3), consistently mid-gameplay — user's own testing suggests

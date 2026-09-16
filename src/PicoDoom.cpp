@@ -17,6 +17,7 @@ extern "C" {
 #include "pico_toolset/fault_handler.h"
 #include "board_config.hpp"
 extern "C" bool sd_init(void);
+extern "C" bool wad_menu_run(void); // src/wad_menu.cpp (Phase 4 boot WAD-selection menu)
 #ifndef PICODOOM_HDMI
 extern "C" void usb_hid_core1_init(void); // src/i_input_usbhid.cpp
 #else
@@ -177,6 +178,12 @@ int main(void)
     printf("PicoDoom: USB-PIO keyboard host init (core0)...\n");
     usb_hid_core0_init();
 #endif
+
+    // Phase 4: boot WAD-selection menu (LVGL, core0) -- lists every IWAD on
+    // the uSD root and lets the user pick, persist and auto-start the last
+    // one (see src/wad_menu.cpp). IdentifyVersion() reads the choice from
+    // wad_boot.cpp before its fixed-name scan (doom/d_main.c, #ifdef PICO).
+    wad_menu_run();
 
     // Engine globals (m_argv.c); no command-line parameters for now --
     // IdentifyVersion finds the WAD (doom1.wad/doom.wad/... ) on the SD root.

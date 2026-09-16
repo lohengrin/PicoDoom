@@ -22,6 +22,16 @@ extern "C" bool sd_init(void)
     return g_sd_card.init(pico_toolset::configs::sdcard::kWaveshareRp2350PiZero);
 }
 
+// SD-card accessor for the boot WAD-selection menu (Phase 4, src/wad_menu.cpp):
+// pico_toolset::SdCard::list_files({"wad"}) enumerates the root directory's
+// .WAD candidates (see that component's sdcard.h). The menu only lists;
+// actual file access goes through the POSIX stdio shim (fopen/fread) the
+// way the engine itself reads the WAD. Boot-menu-only, core0.
+extern "C" pico_toolset::SdCard& sd_card(void)
+{
+    return g_sd_card;
+}
+
 // ---------------------------------------------------------------------------
 // time / misc glue (strong overrides of pico-sdk's weak defaults)
 // ---------------------------------------------------------------------------
