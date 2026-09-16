@@ -27,17 +27,24 @@ if(NOT DEFINED PICO_BOARD)
 endif()
 set(PICO_BOARD_HEADER_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/pico-toolset/boards CACHE STRING "" FORCE)
 
-# Output driver: "lcd" (default, external Waveshare ILI9486 SPI panel) or
-# "hdmi" (onboard DVI/HDMI TMDS connector, via Pico-Toolset's
-# pico_toolset_dvi_hdmi -- see docs/HDMI_PLAN.md). A single enum-valued cache
-# variable rather than two independent booleans (TOM6809's
-# WAVESHARE_HDMI_SUPPORT/WAVESHARE_LCD_SUPPORT pattern): "both at once" is
-# then structurally impossible, so no separate FATAL_ERROR guard is needed
-# beyond validating the string itself, below.
-set(PICODOOM_VIDEO_OUTPUT "lcd" CACHE STRING "Output driver: lcd | hdmi")
-set_property(CACHE PICODOOM_VIDEO_OUTPUT PROPERTY STRINGS lcd hdmi)
-if(NOT PICODOOM_VIDEO_OUTPUT STREQUAL "lcd" AND NOT PICODOOM_VIDEO_OUTPUT STREQUAL "hdmi")
-    message(FATAL_ERROR "PICODOOM_VIDEO_OUTPUT must be 'lcd' or 'hdmi', got '${PICODOOM_VIDEO_OUTPUT}'")
+# Output driver: "lcd" (default, external Waveshare ILI9486 SPI panel),
+# "lcd-st7796" (same board/header wiring, the ST7796U panel replacing it --
+# see Pico-Toolset's pico_toolset_st7796, not yet hardware-validated on this
+# project as of its addition), or "hdmi" (onboard DVI/HDMI TMDS connector,
+# via Pico-Toolset's pico_toolset_dvi_hdmi -- see docs/HDMI_PLAN.md). A
+# single enum-valued cache variable rather than independent booleans
+# (TOM6809's WAVESHARE_HDMI_SUPPORT/WAVESHARE_LCD_SUPPORT pattern): an
+# invalid combination is then structurally impossible, so no separate
+# FATAL_ERROR guard is needed beyond validating the string itself, below.
+# "lcd" and "lcd-st7796" are both LCD-family builds (boot WAD-menu touch
+# input, XPT2046, etc.) that differ only in which physical panel driver they
+# link -- see the `NOT PICODOOM_VIDEO_OUTPUT STREQUAL "hdmi"` checks below
+# for that shared branch, and the nested check for the two LCD panels' own
+# differences.
+set(PICODOOM_VIDEO_OUTPUT "lcd" CACHE STRING "Output driver: lcd | lcd-st7796 | hdmi")
+set_property(CACHE PICODOOM_VIDEO_OUTPUT PROPERTY STRINGS lcd lcd-st7796 hdmi)
+if(NOT PICODOOM_VIDEO_OUTPUT STREQUAL "lcd" AND NOT PICODOOM_VIDEO_OUTPUT STREQUAL "lcd-st7796" AND NOT PICODOOM_VIDEO_OUTPUT STREQUAL "hdmi")
+    message(FATAL_ERROR "PICODOOM_VIDEO_OUTPUT must be 'lcd', 'lcd-st7796', or 'hdmi', got '${PICODOOM_VIDEO_OUTPUT}'")
 endif()
 
 # initialize the SDK based on PICO_SDK_PATH
@@ -67,8 +74,10 @@ set(PICO_TOOLSET_BUILD_SSD1306 OFF CACHE BOOL "" FORCE)
 set(PICO_TOOLSET_BUILD_I2S_AUDIO OFF CACHE BOOL "" FORCE)
 set(PICO_TOOLSET_BUILD_RESET_BUTTONS OFF CACHE BOOL "" FORCE)
 set(PICO_TOOLSET_BUILD_SCREEN OFF CACHE BOOL "" FORCE)
+set(PICO_TOOLSET_BUILD_ST7789 OFF CACHE BOOL "" FORCE) # unused by either LCD panel this project supports
 if(PICODOOM_VIDEO_OUTPUT STREQUAL "hdmi")
     set(PICO_TOOLSET_BUILD_ILI9486 OFF CACHE BOOL "" FORCE)
+    set(PICO_TOOLSET_BUILD_ST7796 OFF CACHE BOOL "" FORCE)
     set(PICO_TOOLSET_BUILD_DVI_HDMI ON CACHE BOOL "" FORCE)
     # HDMI data-island digital audio -- on from Phase B (SFX) onward, see
     # docs/HDMI_PLAN.md's phased rollout and src/i_sound_dvi.cpp.
@@ -78,13 +87,20 @@ if(PICODOOM_VIDEO_OUTPUT STREQUAL "hdmi")
     # panel, so no touch driver (see src/wad_menu.cpp's #ifndef PICODOOM_HDMI).
     set(PICO_TOOLSET_BUILD_XPT2046 OFF CACHE BOOL "" FORCE)
 else()
-    set(PICO_TOOLSET_BUILD_ILI9486 ON CACHE BOOL "" FORCE)
     set(PICO_TOOLSET_BUILD_DVI_HDMI OFF CACHE BOOL "" FORCE)
     set(PICO_TOOLSET_DVI_HDMI_AUDIO OFF CACHE BOOL "" FORCE)
-    # XPT2046 (SPI touchscreen on the LCD panel) -- on for this build so the
-    # boot WAD-selection menu (src/wad_menu.cpp, Phase 4) can be driven by
-    # touch as well as mouse/keyboard/joystick.
+    # XPT2046 (SPI touchscreen on the LCD panel) -- on for both LCD-family
+    # builds so the boot WAD-selection menu (src/wad_menu.cpp, Phase 4) can
+    # be driven by touch as well as mouse/keyboard/joystick. Same pins/bus
+    # either way -- see src/board_config.hpp.
     set(PICO_TOOLSET_BUILD_XPT2046 ON CACHE BOOL "" FORCE)
+    if(PICODOOM_VIDEO_OUTPUT STREQUAL "lcd-st7796")
+        set(PICO_TOOLSET_BUILD_ILI9486 OFF CACHE BOOL "" FORCE)
+        set(PICO_TOOLSET_BUILD_ST7796 ON CACHE BOOL "" FORCE)
+    else()
+        set(PICO_TOOLSET_BUILD_ILI9486 ON CACHE BOOL "" FORCE)
+        set(PICO_TOOLSET_BUILD_ST7796 OFF CACHE BOOL "" FORCE)
+    endif()
 endif()
 # Doom's WAD loader (doom/w_wad.c) seeks around inside files via libc stdio,
 # so this project needs the sdcard component's POSIX syscall shim, not just
@@ -121,19 +137,21 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(lvgl)
 
-# Boot-menu sources, common to both outputs, plus the per-output LVGL display
-# driver (LCD: blit onto the same pico_toolset::Ili9486 the game shares;
-# HDMI: write g_framebuf, which core1's DVI encoder scans out).
+# Boot-menu sources, common to all outputs, plus the per-output LVGL display
+# driver (LCD family: blit onto the same DisplayPanel the game shares, via
+# i_video_lcd_display() -- src/lvgl_display_lcd.cpp works unchanged for
+# either LCD panel this project supports; HDMI: write g_framebuf, which
+# core1's DVI encoder scans out).
 set(PICODOOM_MENU_SRC
     src/lvgl_mem_pool.cpp
     src/lvgl_indev.cpp
     src/wad_boot.cpp
     src/wad_menu.cpp
 )
-if(PICODOOM_VIDEO_OUTPUT STREQUAL "lcd")
-    list(APPEND PICODOOM_MENU_SRC src/lvgl_display_lcd.cpp)
-else()
+if(PICODOOM_VIDEO_OUTPUT STREQUAL "hdmi")
     list(APPEND PICODOOM_MENU_SRC src/lvgl_display_dvi.cpp)
+else()
+    list(APPEND PICODOOM_MENU_SRC src/lvgl_display_lcd.cpp)
 endif()
 
 SET(DOOMSRC
@@ -243,12 +261,15 @@ foreach(f ${DOOMSRC})
 endforeach()
 
 # Video/sound source swap, driven by PICODOOM_VIDEO_OUTPUT (see above).
-set(PICODOOM_VIDEO_SRC src/i_video_ili9486.cpp)
 set(PICODOOM_SOUND_SRC doom/i_sound_null.c)
 if(PICODOOM_VIDEO_OUTPUT STREQUAL "hdmi")
     set(PICODOOM_VIDEO_SRC src/i_video_dvi.cpp)
     # Phase B (SFX) of docs/HDMI_PLAN.md's rollout -- see src/i_sound_dvi.cpp.
     set(PICODOOM_SOUND_SRC src/i_sound_dvi.cpp)
+elseif(PICODOOM_VIDEO_OUTPUT STREQUAL "lcd-st7796")
+    set(PICODOOM_VIDEO_SRC src/i_video_st7796.cpp)
+else()
+    set(PICODOOM_VIDEO_SRC src/i_video_ili9486.cpp)
 endif()
 
 # rest of your project
@@ -310,8 +331,9 @@ target_link_libraries(PicoDoom
     pico_toolset_psram
     pico_toolset_fault_handler
     $<$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},lcd>:pico_toolset_ili9486>
+    $<$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},lcd-st7796>:pico_toolset_st7796>
     $<$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},hdmi>:pico_toolset_dvi_hdmi>
-    $<$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},lcd>:pico_toolset_xpt2046>
+    $<$<NOT:$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},hdmi>>:pico_toolset_xpt2046>
     pico_toolset_usb_hid
     pico_multicore
     hardware_watchdog
@@ -337,6 +359,11 @@ if(PICODOOM_VIDEO_OUTPUT STREQUAL "hdmi")
     # build's uSD wiring may not need it itself -- don't rely on the
     # LCD-build comment below, which is about a different PIO consumer.
     target_compile_definitions(PicoDoom PRIVATE PICO_PIO_USE_GPIO_BASE=1)
+elseif(PICODOOM_VIDEO_OUTPUT STREQUAL "lcd-st7796")
+    # Distinguishes the two LCD panel variants for src/board_config.hpp's
+    # panel-specific config functions -- both are "not hdmi" so PICODOOM_HDMI
+    # alone can't tell them apart.
+    target_compile_definitions(PicoDoom PRIVATE PICODOOM_ST7796=1)
 endif()
 # PICO_PIO_USE_GPIO_BASE=1 no longer needs setting here for the LCD build:
 # pico_toolset_sdcard links pico_fatfs PUBLIC, and

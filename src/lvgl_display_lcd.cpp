@@ -1,8 +1,10 @@
 // LVGL display driver for the LCD build of the boot WAD-selection menu
-// (Phase 4, src/wad_menu.cpp): bridges lv_display_t to the same
-// pico_toolset::Ili9486 the game itself drives (i_video_lcd_display()). The
-// LVGL canvas IS the panel (480x320), full size -- the menu is its own
-// screen, not a layer over DOOM's 320x200 viewport.
+// (Phase 4, src/wad_menu.cpp): bridges lv_display_t to the same panel the
+// game itself drives (i_video_lcd_display()), via the DisplayPanel
+// interface rather than a concrete Ili9486/St7796 -- this file works
+// unchanged for either LCD panel this project supports. The LVGL canvas IS
+// the panel (480x320), full size -- the menu is its own screen, not a
+// layer over DOOM's 320x200 viewport.
 //
 // Mirrors TOM6809's LvglDisplayDriver (validated on this exact board/panel):
 // partial render mode with a small tile buffer (40 rows, 480*40*2 = 38,400
@@ -21,7 +23,7 @@
 // Ownership handoff: the menu's flush is the only SPI1 bus user while it
 // runs (core1 is idle in its blit state machine -- no FIFO work to do), and
 // the game's core1 blit never starts until after the menu exits.
-#include "pico_toolset/ili9486.h"
+#include "pico_toolset/display_panel.h"
 #include "pico_toolset/psram.h"
 #include "lvgl.h"
 
@@ -30,7 +32,7 @@
 #include <cstdlib>
 #include <span>
 
-extern "C" pico_toolset::Ili9486& i_video_lcd_display(void); // src/i_video_ili9486.cpp
+extern "C" pico_toolset::DisplayPanel& i_video_lcd_display(void); // src/i_video_ili9486.cpp / src/i_video_st7796.cpp
 
 namespace {
 constexpr int kBufRows = 40;
@@ -40,15 +42,15 @@ uint16_t* g_draw_buf = nullptr;
 
 void flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* px_map)
 {
-    auto& lcd = *static_cast<pico_toolset::Ili9486*>(lv_display_get_user_data(disp));
+    auto& lcd = *static_cast<pico_toolset::DisplayPanel*>(lv_display_get_user_data(disp));
 
     const size_t pixel_count =
         static_cast<size_t>(area->x2 - area->x1 + 1) * static_cast<size_t>(area->y2 - area->y1 + 1);
     auto* pixels = reinterpret_cast<uint16_t*>(px_map);
 
-    // pico_toolset::Ili9486::write_pixels() expects pixels already
-    // byte-swapped to big-endian wire order by the caller (see its doc
-    // comment). LVGL's draw buffer holds native (little-endian on this
+    // DisplayPanel::write_pixels() expects pixels already byte-swapped to
+    // big-endian wire order by the caller (see its doc comment). LVGL's
+    // draw buffer holds native (little-endian on this
     // Cortex-M33) RGB565 regardless of LV_COLOR_FORMAT_RGB565's name --
     // identical swap TOM6809's LCD flush does. Swapped in place: this buffer
     // is LVGL's own and not touched again until the next render.
@@ -67,7 +69,9 @@ void flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* px_map)
 
 extern "C" void lvgl_display_lcd_init(void)
 {
-    constexpr size_t kBufBytes = pico_toolset::Ili9486::kWidth * kBufRows * sizeof(uint16_t);
+    pico_toolset::DisplayPanel& panel = i_video_lcd_display();
+
+    const size_t kBufBytes = static_cast<size_t>(panel.width()) * kBufRows * sizeof(uint16_t);
     void* buf = pico_toolset::psram_status().test_ok ? pico_toolset::psram_malloc(kBufBytes)
                                                      : std::malloc(kBufBytes);
     if (!buf) {
@@ -76,8 +80,8 @@ extern "C" void lvgl_display_lcd_init(void)
     }
     g_draw_buf = static_cast<uint16_t*>(buf);
 
-    lv_display_t* disp = lv_display_create(pico_toolset::Ili9486::kWidth, pico_toolset::Ili9486::kHeight);
-    lv_display_set_user_data(disp, &i_video_lcd_display());
+    lv_display_t* disp = lv_display_create(panel.width(), panel.height());
+    lv_display_set_user_data(disp, &panel);
     lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565);
     lv_display_set_buffers(disp, g_draw_buf, nullptr, kBufBytes, LV_DISPLAY_RENDER_MODE_PARTIAL);
     lv_display_set_flush_cb(disp, flush_cb);

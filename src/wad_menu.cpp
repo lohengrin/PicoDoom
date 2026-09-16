@@ -29,7 +29,7 @@
 #include "pico_toolset/sdcard.h"
 #include "pico_toolset/usb_hid_host.h"
 #ifndef PICODOOM_HDMI
-#include "pico_toolset/ili9486.h"
+#include "pico_toolset/display_panel.h"
 #include "pico_toolset/xpt2046.h"
 #include "pico_toolset/xpt2046_configs.h"
 #endif
@@ -50,7 +50,12 @@ void i_input_menu_usb_task(void); // i_input_usbhid.cpp (HDMI build only; no-op 
 void i_input_reset_menu_input(void); // i_input_usbhid.cpp (edge-latch re-baseline)
 pico_toolset::UsbHidHost& i_input_usb_hid(void); // i_input_usbhid.cpp
 #ifndef PICODOOM_HDMI
-pico_toolset::Ili9486& i_video_lcd_display(void); // i_video_ili9486.cpp
+// DisplayPanel&, not the concrete Ili9486/St7796 -- this menu only needs
+// the shared windowed/DMA-streaming contract (see display_panel.h), so it
+// works unchanged for either LCD panel this project supports (see
+// src/i_video_ili9486.cpp / src/i_video_st7796.cpp, whichever is compiled
+// in for this build's PICODOOM_VIDEO_OUTPUT).
+pico_toolset::DisplayPanel& i_video_lcd_display(void); // i_video_ili9486.cpp / i_video_st7796.cpp
 void lvgl_display_lcd_init(void); // lvgl_display_lcd.cpp
 void lvgl_indev_init_touch(pico_toolset::Xpt2046Touch& touch); // lvgl_indev.cpp
 #else

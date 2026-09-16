@@ -58,5 +58,6 @@ build/
 build-check/
 build-diag*/
 build-hdmi/
+build-st7796/
 pico_display_demo.cpp
 wad/**

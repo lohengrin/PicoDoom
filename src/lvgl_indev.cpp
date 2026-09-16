@@ -28,13 +28,20 @@
 // (and has stopped) the countdown.
 #include "pico_toolset/usb_hid_host.h"
 #ifndef PICODOOM_HDMI
-#include "pico_toolset/ili9486.h"
+#include "pico_toolset/display_panel.h"
 #include "pico_toolset/xpt2046.h"
 #include "pico_toolset/xpt2046_calibration.h"
 #endif
 #include "lvgl.h"
 
 #include <cstdint>
+
+#ifndef PICODOOM_HDMI
+// DisplayPanel&, not the concrete Ili9486/St7796 -- see wad_menu.cpp's
+// identically-declared forward decl for why (works unchanged for either LCD
+// panel this project supports).
+extern "C" pico_toolset::DisplayPanel& i_video_lcd_display(void); // i_video_ili9486.cpp / i_video_st7796.cpp
+#endif
 
 namespace {
 
@@ -114,10 +121,11 @@ void touch_read_cb(lv_indev_t* indev, lv_indev_data_t* data)
     const uint16_t raw_h = cal.swap_axes ? raw.raw_y : raw.raw_x;
     const uint16_t raw_v = cal.swap_axes ? raw.raw_x : raw.raw_y;
 
+    pico_toolset::DisplayPanel& panel = i_video_lcd_display();
     const double lcd_x = pico_toolset::touch_calibration_linear_map(
-        raw_h, cal.raw_h_min, cal.raw_h_max, 0.0, static_cast<double>(pico_toolset::Ili9486::kWidth - 1));
+        raw_h, cal.raw_h_min, cal.raw_h_max, 0.0, static_cast<double>(panel.width() - 1));
     const double lcd_y = pico_toolset::touch_calibration_linear_map(
-        raw_v, cal.raw_v_min, cal.raw_v_max, 0.0, static_cast<double>(pico_toolset::Ili9486::kHeight - 1));
+        raw_v, cal.raw_v_min, cal.raw_v_max, 0.0, static_cast<double>(panel.height() - 1));
 
     g_input_seen = true;
     data->point.x = static_cast<int32_t>(lcd_x);
