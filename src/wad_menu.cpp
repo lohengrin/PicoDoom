@@ -25,6 +25,7 @@
 //
 // Only ever runs on core0, only once per boot; the game never sees it again.
 #include "lvgl.h"
+#include "hardware/watchdog.h"
 #include "pico_toolset/psram.h"
 #include "pico_toolset/sdcard.h"
 #include "pico_toolset/usb_hid_host.h"
@@ -74,8 +75,21 @@ namespace {
 // UI state read by LVGL's C-style callbacks and the pump loop.
 volatile int g_selected = -1; // index into g_wads, -1 = none yet
 volatile bool g_cancelled = false;
+// Set when wad_menu_run(false) is called (no uSD card mounted) -- gates the
+// "No uSD card" screen/reboot-only flow below instead of the normal WAD list.
+bool g_no_sd_mode = false;
 
 std::vector<std::string> g_wads;
+
+// Arms a watchdog reset and spins until it fires -- same pattern as
+// doom/i_system.c's I_Quit (watchdog_reboot(0,0,100) only ARMS the reset;
+// the caller must wait for it, not return). Never returns.
+[[noreturn]] void reboot_now()
+{
+    watchdog_reboot(0, 0, 100);
+    for (;;)
+        tight_loop_contents();
+}
 
 bool is_iwad(const char* name)
 {
@@ -111,24 +125,39 @@ void button_event_cb(lv_event_t* e)
     g_selected = static_cast<int>(reinterpret_cast<intptr_t>(lv_event_get_user_data(e)));
 }
 
+void reboot_button_event_cb(lv_event_t* e)
+{
+    (void)e;
+    reboot_now();
+}
+
 // Esc bubbles up from the focused button through LV_EVENT_KEY to the screen
 // (buttons carry LV_OBJ_FLAG_EVENT_BUBBLE so the group's key events reach
 // it) -- cancels the menu. Lv_indev is the keypad indev from lvgl_indev.cpp.
+// In no-uSD mode there's no WAD to fall back to, so Esc reboots too, same as
+// clicking/pressing the Reboot button -- there's no sensible "cancel" state.
 void screen_key_event_cb(lv_event_t* e)
 {
     (void)e;
-    if (lv_indev_get_key(lv_indev_active()) == LV_KEY_ESC)
+    if (lv_indev_get_key(lv_indev_active()) == LV_KEY_ESC) {
+        if (g_no_sd_mode)
+            reboot_now();
         g_cancelled = true;
+    }
 }
 
 } // namespace
 
 // Returns true when the user picked a WAD (now in pico_selected_wad()),
 // false when the menu was skipped/cancelled or couldn't come up at all.
-extern "C" bool wad_menu_run(void)
+// sd_available: false when src/PicoDoom.cpp's sd_init() failed (no card
+// mounted, e.g. no card inserted) -- shows a "No uSD card" screen with a
+// reboot button instead of trying to enumerate a filesystem that isn't there.
+extern "C" bool wad_menu_run(bool sd_available)
 {
     g_selected = -1;
     g_cancelled = false;
+    g_no_sd_mode = !sd_available;
     g_wads.clear();
 
     // Output first, before any LVGL exists: LCD brings up + blackens the
@@ -160,13 +189,16 @@ extern "C" bool wad_menu_run(void)
     auto scale_x = [&](int v) { return v * hor_res / kRefW; };
     auto scale_y = [&](int v) { return v * ver_res / kRefH; };
 
-    // Enumerate uSD root for real IWADs (magic-checked).
-    const std::vector<std::string> candidates = sd_card().list_files({"wad"});
-    for (const auto& n : candidates) {
-        if (is_iwad(n.c_str()))
-            g_wads.push_back(n);
+    // Enumerate uSD root for real IWADs (magic-checked) -- skipped entirely
+    // in no-uSD mode, nothing to enumerate.
+    if (sd_available) {
+        const std::vector<std::string> candidates = sd_card().list_files({"wad"});
+        for (const auto& n : candidates) {
+            if (is_iwad(n.c_str()))
+                g_wads.push_back(n);
+        }
+        printf("PicoDoom: WAD menu -- %u IWAD candidate(s) on uSD\n", static_cast<unsigned>(g_wads.size()));
     }
-    printf("PicoDoom: WAD menu -- %u IWAD candidate(s) on uSD\n", static_cast<unsigned>(g_wads.size()));
 
     // ------------------------------------------------------------------
     // Widgets
@@ -202,7 +234,8 @@ extern "C" bool wad_menu_run(void)
     lv_obj_align(credit, LV_ALIGN_TOP_MID, 0, scale_y(46));
 
     lv_obj_t* hint = lv_label_create(scr);
-    lv_label_set_text(hint, "Enter play   Esc skip   Up/Down choose");
+    lv_label_set_text(hint, sd_available ? "Enter play   Esc skip   Up/Down choose"
+                                          : "Enter/Esc reboot");
     lv_obj_set_style_text_font(hint, &lv_font_montserrat_12, 0);
     lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -scale_y(8));
 
@@ -226,15 +259,22 @@ extern "C" bool wad_menu_run(void)
     lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(list, 0, 0);
 
-    if (g_wads.empty()) {
+    if (!sd_available) {
+        lv_obj_add_flag(list, LV_OBJ_FLAG_HIDDEN); // no list content in this mode
+        lv_obj_t* empty = lv_label_create(scr);
+        lv_label_set_text(empty, "No uSD card");
+        lv_obj_set_style_text_font(empty, &lv_font_montserrat_22, 0);
+        lv_obj_align(empty, LV_ALIGN_CENTER, 0, -scale_y(20));
+    } else if (g_wads.empty()) {
         lv_obj_t* empty = lv_label_create(scr);
         lv_label_set_text(empty, "No IWADs found on uSD");
         lv_obj_set_style_text_font(empty, &lv_font_montserrat_22, 0);
         lv_obj_center(empty);
     }
 
-    // Navigation group: every WAD button plus the Skip button. Pre-focused
-    // to the persisted last choice (or the first WAD).
+    // Navigation group: every WAD button plus the Skip button (or, in
+    // no-uSD mode, just the Reboot button below). Pre-focused to the
+    // persisted last choice (or the first WAD).
     lv_group_t* group = lv_group_create();
     lv_group_set_default(group);
 
@@ -264,9 +304,26 @@ extern "C" bool wad_menu_run(void)
             focus_idx = static_cast<int>(i);
     }
 
+    lv_obj_t* reboot_btn = nullptr;
+    if (!sd_available) {
+        reboot_btn = lv_button_create(scr);
+        lv_obj_set_size(reboot_btn, scale_x(160), scale_y(40));
+        lv_obj_align(reboot_btn, LV_ALIGN_CENTER, 0, scale_y(30));
+        lv_obj_add_event_cb(reboot_btn, reboot_button_event_cb, LV_EVENT_CLICKED, nullptr);
+        style_nav_button(reboot_btn);
+
+        lv_obj_t* reboot_lbl = lv_label_create(reboot_btn);
+        lv_label_set_text(reboot_lbl, "Reboot");
+        lv_obj_center(reboot_lbl);
+
+        lv_group_add_obj(group, reboot_btn);
+    }
+
     lv_obj_add_event_cb(scr, screen_key_event_cb, LV_EVENT_KEY, nullptr);
 
-    if (!buttons.empty())
+    if (reboot_btn != nullptr)
+        lv_group_focus_obj(reboot_btn);
+    else if (!buttons.empty())
         lv_group_focus_obj(buttons[static_cast<size_t>(focus_idx)]);
 
     // ------------------------------------------------------------------

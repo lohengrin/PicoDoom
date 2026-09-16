@@ -17,7 +17,7 @@ extern "C" {
 #include "pico_toolset/fault_handler.h"
 #include "board_config.hpp"
 extern "C" bool sd_init(void);
-extern "C" bool wad_menu_run(void); // src/wad_menu.cpp (Phase 4 boot WAD-selection menu)
+extern "C" bool wad_menu_run(bool sd_available); // src/wad_menu.cpp (Phase 4 boot WAD-selection menu)
 #ifndef PICODOOM_HDMI
 extern "C" void usb_hid_core1_init(void); // src/i_input_usbhid.cpp
 #else
@@ -161,9 +161,14 @@ int main(void)
            (unsigned)(psram.size_bytes / 1024), (unsigned)psram.clock_hz);
 
     printf("PicoDoom: uSD mount...\n");
-    if (!sd_init())
-        fatal("uSD mount failed (is a FAT32 card with the WAD inserted?)");
-    printf("PicoDoom: uSD mounted\n");
+    // No card / mount failure is a normal, recoverable state (a board with
+    // no card inserted, per pico_toolset::SdCard::init()'s own doc comment)
+    // -- not fatal. Carry the result into wad_menu_run() so it can show a
+    // "No uSD card" screen with a reboot button instead of the engine
+    // silently hanging (or crashing later trying to load a WAD that was
+    // never there) with nothing on-screen.
+    const bool sd_available = sd_init();
+    printf(sd_available ? "PicoDoom: uSD mounted\n" : "PicoDoom: no uSD card detected\n");
 
     // Phase 3: USB-PIO HID keyboard/mouse host (GPIO28/29) -- started here,
     // before D_DoomMain(), so it has the whole WAD-load/engine-init stretch
@@ -183,7 +188,7 @@ int main(void)
     // the uSD root and lets the user pick, persist and auto-start the last
     // one (see src/wad_menu.cpp). IdentifyVersion() reads the choice from
     // wad_boot.cpp before its fixed-name scan (doom/d_main.c, #ifdef PICO).
-    wad_menu_run();
+    wad_menu_run(sd_available);
 
     // Engine globals (m_argv.c); no command-line parameters for now --
     // IdentifyVersion finds the WAD (doom1.wad/doom.wad/... ) on the SD root.
