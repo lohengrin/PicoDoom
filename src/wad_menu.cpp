@@ -243,6 +243,12 @@ extern "C" bool wad_menu_run(bool sd_available)
     // and the list -- NOT at the bottom where it collides with the centered
     // hint on the 320px DVI canvas. Hidden once real input arrives.
     lv_obj_t* countdown = lv_label_create(scr);
+    // Blank, not LVGL's "Text" placeholder default: this only ever gets a
+    // real string once the pump loop's first countdown-active tick runs
+    // (below), which never happens at all in no-uSD mode or when there are
+    // no WADs to auto-start -- and even when it does, lv_timer_handler()'s
+    // very first render (also below) happens before that tick sets it.
+    lv_label_set_text(countdown, "");
     lv_obj_set_style_text_font(countdown, &lv_font_montserrat_12, 0);
     lv_obj_align(countdown, LV_ALIGN_TOP_RIGHT, -scale_x(10), scale_y(48));
 
