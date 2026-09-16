@@ -127,6 +127,14 @@ void R_InitPlanes (void)
     visplanes = (visplane_t *) psram_malloc (MAXVISPLANES * sizeof (*visplanes));
   if (!visplanes)
     I_Error ("R_InitPlanes: visplane pool alloc failed");
+  /* Upstream's static visplanes[] array is zero-initialized .bss; a
+   * psram_malloc'd pool carries whatever garbage the previous region
+   * occupant left. R_NewPlane() only memsets top[] to 0xff -- bottom[]
+   * stays as-is for columns a seg never touches, and a stray 0xff (=255)
+   * there makes R_MakeSpans() hand R_MapPlane() a row past viewheight
+   * (R_MapPlane: 74, 74 at 255). Zero the pool so unwritten columns keep a
+   * benign bottom like upstream. */
+  memset (visplanes, 0, MAXVISPLANES * sizeof (*visplanes));
 #endif
   // Doh!
 }

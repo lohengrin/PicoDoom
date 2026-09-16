@@ -221,6 +221,20 @@ void I_Error (char *error, ...)
 
     D_QuitNetGame ();
     I_ShutdownGraphics();
-    
+
+#ifdef PICO
+    /* No OS and no safe bare-metal exit under PICO: newlib's exit() ->
+     * _exit() is the crt0 fallback (a `bkpt`), which with no debugger
+     * attached escalates to HardFault -> pico_toolset's fault handler ->
+     * watchdog reboot -- silently erasing the very "Error:" line that
+     * identifies this bug. Hang right here instead so the message stays on
+     * the USB-CDC console for diagnosis (same reasoning as PLAN.md's I_Quit
+     * note). */
+    printf ("\nPicoDoom: engine error -- device halted\n");
+    fflush (stdout);
+    for (;;)
+	;
+#else
     exit(-1);
+#endif
 }
