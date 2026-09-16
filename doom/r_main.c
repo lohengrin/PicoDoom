@@ -710,8 +710,11 @@ void R_ExecuteSetViewSize (void)
     }
     else
     {
-	scaledviewwidth = setblocks*32;
-	viewheight = (setblocks*168/10)&~7;
+	// 32 and 168 are classic-320x200-space constants (32 = one tenth of
+	// SCREENWIDTH, 168 = SCREENHEIGHT-SBARHEIGHT at 200-32) -- UI_SCALE
+	// them to the build's actual physical resolution (see doomdef.h).
+	scaledviewwidth = setblocks*UI_SCALE(32);
+	viewheight = (setblocks*UI_SCALE(168)/10)&~7;
     }
     
     detailshift = setdetail;

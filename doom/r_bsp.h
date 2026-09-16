@@ -45,7 +45,11 @@ extern boolean		markceiling;
 
 extern boolean		skymap;
 
+#ifdef PICO
+extern drawseg_t*	drawsegs;
+#else
 extern drawseg_t	drawsegs[MAXDRAWSEGS];
+#endif
 extern drawseg_t*	ds_p;
 
 extern lighttable_t**	hscalelight;

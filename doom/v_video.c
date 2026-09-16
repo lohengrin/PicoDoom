@@ -197,32 +197,87 @@ V_CopyRect
  
 
 //
+// V_DrawPatchColumns
+// Shared post-walking core for V_DrawPatch/V_DrawPatchFlipped: given a
+// logical-space (x,y) already adjusted for the patch's own offsets, and a
+// function to map a source column index to its column_t* (forward or
+// mirrored), replicate every source pixel into its UI_SCALE()-mapped
+// physical destination block. UI_SCALE is an exact rational (identity for
+// hdmi, x3/2 for lcd), so mapping each logical column/row index i to the
+// physical range [UI_SCALE(i), UI_SCALE(i+1)) tiles perfectly across the
+// whole patch with no gaps or overlaps -- no running accumulator needed.
+//
+static void
+V_DrawPatchColumns
+( int		x,
+  int		y,
+  int		scrn,
+  patch_t*	patch,
+  boolean	flip )
+{
+    int		count;
+    int		col;
+    column_t*	column;
+    byte*	dest;
+    byte*	source;
+    int		w;
+    int		px0, px1, px, py0, py1, py;
+
+    w = SHORT(patch->width);
+
+    for ( col=0 ; col<w ; col++ )
+    {
+	int srccol = flip ? (w-1-col) : col;
+	column = (column_t *)((byte *)patch + LONG(patch->columnofs[srccol]));
+
+	px0 = UI_SCALE(x+col);
+	px1 = UI_SCALE(x+col+1);
+
+	// step through the posts in a column
+	while (column->topdelta != 0xff )
+	{
+	    source = (byte *)column + 3;
+	    count = column->length;
+
+	    for ( ; count>0 ; count--, source++ )
+	    {
+		int row = y + column->topdelta + (column->length-count);
+		py0 = UI_SCALE(row);
+		py1 = UI_SCALE(row+1);
+
+		for ( py=py0 ; py<py1 ; py++ )
+		{
+		    dest = screens[scrn] + py*SCREENWIDTH + px0;
+		    for ( px=px0 ; px<px1 ; px++ )
+			*dest++ = *source;
+		}
+	    }
+	    column = (column_t *)(  (byte *)column + column->length
+				    + 4 );
+	}
+    }
+}
+
+//
 // V_DrawPatch
-// Masks a column based masked pic to the screen. 
+// Masks a column based masked pic to the screen, scaled by UI_SCALE()
+// from the logical 320x200 coordinate space the patch position (x,y) and
+// the patch's own dimensions/offsets are always expressed in.
 //
 void
 V_DrawPatch
 ( int		x,
   int		y,
   int		scrn,
-  patch_t*	patch ) 
-{ 
-
-    int		count;
-    int		col; 
-    column_t*	column; 
-    byte*	desttop;
-    byte*	dest;
-    byte*	source; 
-    int		w; 
-	 
-    y -= SHORT(patch->topoffset); 
-    x -= SHORT(patch->leftoffset); 
-#ifdef RANGECHECK 
+  patch_t*	patch )
+{
+    y -= SHORT(patch->topoffset);
+    x -= SHORT(patch->leftoffset);
+#ifdef RANGECHECK
     if (x<0
-	||x+SHORT(patch->width) >SCREENWIDTH
+	||UI_SCALE(x+SHORT(patch->width)) >SCREENWIDTH
 	|| y<0
-	|| y+SHORT(patch->height)>SCREENHEIGHT 
+	|| UI_SCALE(y+SHORT(patch->height))>SCREENHEIGHT
 	|| (unsigned)scrn>4)
     {
       fprintf( stderr, "Patch at %d,%d exceeds LFB\n", x,y );
@@ -230,40 +285,18 @@ V_DrawPatch
       fprintf( stderr, "V_DrawPatch: bad patch (ignored)\n");
       return;
     }
-#endif 
- 
+#endif
+
     if (!scrn)
-	V_MarkRect (x, y, SHORT(patch->width), SHORT(patch->height)); 
+	V_MarkRect (UI_SCALE(x), UI_SCALE(y),
+		    UI_SCALE(x+SHORT(patch->width))-UI_SCALE(x),
+		    UI_SCALE(y+SHORT(patch->height))-UI_SCALE(y));
 
-    col = 0; 
-    desttop = screens[scrn]+y*SCREENWIDTH+x; 
-	 
-    w = SHORT(patch->width); 
+    V_DrawPatchColumns(x, y, scrn, patch, false);
+}
 
-    for ( ; col<w ; x++, col++, desttop++)
-    { 
-	column = (column_t *)((byte *)patch + LONG(patch->columnofs[col])); 
- 
-	// step through the posts in a column 
-	while (column->topdelta != 0xff ) 
-	{ 
-	    source = (byte *)column + 3; 
-	    dest = desttop + column->topdelta*SCREENWIDTH; 
-	    count = column->length; 
-			 
-	    while (count--) 
-	    { 
-		*dest = *source++; 
-		dest += SCREENWIDTH; 
-	    } 
-	    column = (column_t *)(  (byte *)column + column->length 
-				    + 4 ); 
-	} 
-    }			 
-} 
- 
 //
-// V_DrawPatchFlipped 
+// V_DrawPatchFlipped
 // Masks a column based masked pic to the screen.
 // Flips horizontally, e.g. to mirror face.
 //
@@ -272,75 +305,115 @@ V_DrawPatchFlipped
 ( int		x,
   int		y,
   int		scrn,
-  patch_t*	patch ) 
-{ 
-
-    int		count;
-    int		col; 
-    column_t*	column; 
-    byte*	desttop;
-    byte*	dest;
-    byte*	source; 
-    int		w; 
-	 
-    y -= SHORT(patch->topoffset); 
-    x -= SHORT(patch->leftoffset); 
-#ifdef RANGECHECK 
+  patch_t*	patch )
+{
+    y -= SHORT(patch->topoffset);
+    x -= SHORT(patch->leftoffset);
+#ifdef RANGECHECK
     if (x<0
-	||x+SHORT(patch->width) >SCREENWIDTH
+	||UI_SCALE(x+SHORT(patch->width)) >SCREENWIDTH
 	|| y<0
-	|| y+SHORT(patch->height)>SCREENHEIGHT 
+	|| UI_SCALE(y+SHORT(patch->height))>SCREENHEIGHT
 	|| (unsigned)scrn>4)
     {
       fprintf( stderr, "Patch origin %d,%d exceeds LFB\n", x,y );
       I_Error ("Bad V_DrawPatch in V_DrawPatchFlipped");
     }
-#endif 
- 
+#endif
+
     if (!scrn)
-	V_MarkRect (x, y, SHORT(patch->width), SHORT(patch->height)); 
+	V_MarkRect (UI_SCALE(x), UI_SCALE(y),
+		    UI_SCALE(x+SHORT(patch->width))-UI_SCALE(x),
+		    UI_SCALE(y+SHORT(patch->height))-UI_SCALE(y));
 
-    col = 0; 
-    desttop = screens[scrn]+y*SCREENWIDTH+x; 
-	 
-    w = SHORT(patch->width); 
+    V_DrawPatchColumns(x, y, scrn, patch, true);
+}
 
-    for ( ; col<w ; x++, col++, desttop++) 
-    { 
-	column = (column_t *)((byte *)patch + LONG(patch->columnofs[w-1-col])); 
- 
-	// step through the posts in a column 
-	while (column->topdelta != 0xff ) 
-	{ 
-	    source = (byte *)column + 3; 
-	    dest = desttop + column->topdelta*SCREENWIDTH; 
-	    count = column->length; 
-			 
-	    while (count--) 
-	    { 
-		*dest = *source++; 
-		dest += SCREENWIDTH; 
-	    } 
-	    column = (column_t *)(  (byte *)column + column->length 
-				    + 4 ); 
-	} 
-    }			 
-} 
- 
+
+//
+// V_DrawPatchPhysical
+// Same post-walking as the original (pre-scaling) V_DrawPatch: a strict
+// 1:1 byte copy with no UI_SCALE applied. For the small set of callers
+// that already compute physical-pixel coordinates themselves (the view
+// border/window-size code in doom/r_draw.c, which tiles a flat pattern
+// into an arbitrary physical-size window -- not a "logical UI widget"
+// that should scale) and must not be scaled a second time.
+//
+void
+V_DrawPatchPhysical
+( int		x,
+  int		y,
+  int		scrn,
+  patch_t*	patch )
+{
+
+    int		count;
+    int		col;
+    column_t*	column;
+    byte*	desttop;
+    byte*	dest;
+    byte*	source;
+    int		w;
+
+    y -= SHORT(patch->topoffset);
+    x -= SHORT(patch->leftoffset);
+#ifdef RANGECHECK
+    if (x<0
+	||x+SHORT(patch->width) >SCREENWIDTH
+	|| y<0
+	|| y+SHORT(patch->height)>SCREENHEIGHT
+	|| (unsigned)scrn>4)
+    {
+      fprintf( stderr, "Patch at %d,%d exceeds LFB\n", x,y );
+      fprintf( stderr, "V_DrawPatchPhysical: bad patch (ignored)\n");
+      return;
+    }
+#endif
+
+    if (!scrn)
+	V_MarkRect (x, y, SHORT(patch->width), SHORT(patch->height));
+
+    col = 0;
+    desttop = screens[scrn]+y*SCREENWIDTH+x;
+
+    w = SHORT(patch->width);
+
+    for ( ; col<w ; x++, col++, desttop++)
+    {
+	column = (column_t *)((byte *)patch + LONG(patch->columnofs[col]));
+
+	// step through the posts in a column
+	while (column->topdelta != 0xff )
+	{
+	    source = (byte *)column + 3;
+	    dest = desttop + column->topdelta*SCREENWIDTH;
+	    count = column->length;
+
+	    while (count--)
+	    {
+		*dest = *source++;
+		dest += SCREENWIDTH;
+	    }
+	    column = (column_t *)(  (byte *)column + column->length
+				    + 4 );
+	}
+    }
+}
+
 
 
 //
 // V_DrawPatchDirect
-// Draws directly to the screen on the pc. 
+// Draws directly to the screen on the pc.
 //
 void
 V_DrawPatchDirect
 ( int		x,
   int		y,
   int		scrn,
-  patch_t*	patch ) 
+  patch_t*	patch )
 {
-    V_DrawPatch (x,y,scrn, patch); 
+    V_DrawPatch (x,y,scrn, patch);
 
     /*
     int		count;

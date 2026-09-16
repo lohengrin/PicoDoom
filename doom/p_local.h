@@ -163,7 +163,11 @@ typedef struct
 #define MAXINTERCEPTS	128
 #endif
 
+#ifdef PICO
+extern intercept_t*	intercepts;
+#else
 extern intercept_t	intercepts[MAXINTERCEPTS];
+#endif
 extern intercept_t*	intercept_p;
 
 typedef boolean (*traverser_t) (intercept_t *in);

@@ -318,7 +318,8 @@ void F_TextWrite (void)
 	}
 		
 	w = SHORT (hu_font[c]->width);
-	if (cx+w > SCREENWIDTH)
+	// cx/w are logical (320x200-space); wrap against logical BASE_WIDTH.
+	if (cx+w > BASE_WIDTH)
 	    break;
 	V_DrawPatch(cx, cy, 0, hu_font[c]);
 	cx+=w;
@@ -641,6 +642,13 @@ F_DrawPatchCol
 //
 // F_BunnyScroll
 //
+// NOTE: unlike the rest of this file's UI, the scrolling pan itself stays
+// unscaled/physical (F_DrawPatchCol draws 1:1, like V_DrawPatchPhysical) --
+// it composites two 320-wide patches into a scrolling 640-wide virtual
+// image and windows SCREENWIDTH pixels of it, which would need the same
+// per-column UI_SCALE() replication V_DrawPatch does to scale correctly.
+// Left as a known minor deviation (small viewport into un-upscaled source
+// art) rather than duplicating that logic for this one rarely-seen screen.
 void F_BunnyScroll (void)
 {
     int		scrolled;
@@ -674,8 +682,11 @@ void F_BunnyScroll (void)
 	return;
     if (finalecount < 1180)
     {
-	V_DrawPatch ((SCREENWIDTH-13*8)/2,
-		     (SCREENHEIGHT-8*8)/2,0, W_CacheLumpName ("END0",PU_CACHE));
+	// (SCREENWIDTH-13*8)/2 mixes physical SCREENWIDTH with a logical
+	// literal -- V_DrawPatch scales its input, so this must stay in
+	// logical (BASE_WIDTH) space, not physical.
+	V_DrawPatch ((BASE_WIDTH-13*8)/2,
+		     (BASE_HEIGHT-8*8)/2,0, W_CacheLumpName ("END0",PU_CACHE));
 	laststage = 0;
 	return;
     }
@@ -690,7 +701,7 @@ void F_BunnyScroll (void)
     }
 	
     sprintf (name,"END%i",stage);
-    V_DrawPatch ((SCREENWIDTH-13*8)/2, (SCREENHEIGHT-8*8)/2,0, W_CacheLumpName (name,PU_CACHE));
+    V_DrawPatch ((BASE_WIDTH-13*8)/2, (BASE_HEIGHT-8*8)/2,0, W_CacheLumpName (name,PU_CACHE));
 }
 
 

@@ -42,6 +42,9 @@ rcsid[] = "$Id: r_bsp.c,v 1.4 1997/02/03 22:45:12 b1 Exp $";
 
 //#include "r_local.h"
 
+#ifdef PICO
+extern void *psram_malloc (size_t);
+#endif
 
 
 seg_t*		curline;
@@ -50,7 +53,15 @@ line_t*		linedef;
 sector_t*	frontsector;
 sector_t*	backsector;
 
+// Pool is in PSRAM on PICO: populated at seg granularity (dozens per
+// frame via R_StoreWallRange), not per-pixel, so PSRAM latency is
+// tolerable -- frees SRAM the native-resolution renderer tables (see
+// doom/doomdef.h) needed. See R_ClearDrawSegs for the one-time alloc.
+#ifdef PICO
+drawseg_t*	drawsegs;
+#else
 drawseg_t	drawsegs[MAXDRAWSEGS];
+#endif
 drawseg_t*	ds_p;
 
 
@@ -67,6 +78,14 @@ R_StoreWallRange
 //
 void R_ClearDrawSegs (void)
 {
+#ifdef PICO
+    if (!drawsegs)
+    {
+	drawsegs = (drawseg_t *) psram_malloc (MAXDRAWSEGS * sizeof (*drawsegs));
+	if (!drawsegs)
+	    I_Error ("R_ClearDrawSegs: drawsegs pool alloc failed");
+    }
+#endif
     ds_p = drawsegs;
 }
 

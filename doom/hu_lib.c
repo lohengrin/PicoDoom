@@ -117,7 +117,9 @@ HUlib_drawTextLine
 	    && c <= '_')
 	{
 	    w = SHORT(l->f[c - l->sc]->width);
-	    if (x+w > SCREENWIDTH)
+	    // x/w are logical (320x200-space, unscaled patch widths) --
+	    // wrap against logical BASE_WIDTH, not physical SCREENWIDTH.
+	    if (x+w > BASE_WIDTH)
 		break;
 	    V_DrawPatchDirect(x, l->y, FG, l->f[c - l->sc]);
 	    x += w;
@@ -125,14 +127,14 @@ HUlib_drawTextLine
 	else
 	{
 	    x += 4;
-	    if (x >= SCREENWIDTH)
+	    if (x >= BASE_WIDTH)
 		break;
 	}
     }
 
     // draw the cursor if requested
     if (drawcursor
-	&& x + SHORT(l->f['_' - l->sc]->width) <= SCREENWIDTH)
+	&& x + SHORT(l->f['_' - l->sc]->width) <= BASE_WIDTH)
     {
 	V_DrawPatchDirect(x, l->y, FG, l->f['_' - l->sc]);
     }
@@ -143,7 +145,8 @@ HUlib_drawTextLine
 void HUlib_eraseTextLine(hu_textline_t* l)
 {
     int			lh;
-    int			y;
+    int			y;		// physical row
+    int			ylimit;		// physical row, one past the last
     int			yoffset;
     static boolean	lastautomapactive = true;
 
@@ -155,7 +158,12 @@ void HUlib_eraseTextLine(hu_textline_t* l)
 	viewwindowx && l->needsupdate)
     {
 	lh = SHORT(l->f[0]->height) + 1;
-	for (y=l->y,yoffset=y*SCREENWIDTH ; y<l->y+lh ; y++,yoffset+=SCREENWIDTH)
+	// l->y/lh are logical (320x200-space); viewwindowy/viewheight below
+	// are already physical (see doom/r_main.c), so convert the erase
+	// row range to physical here before comparing/addressing screens[].
+	y = UI_SCALE(l->y);
+	ylimit = UI_SCALE(l->y + lh);
+	for (yoffset=y*SCREENWIDTH ; y<ylimit ; y++,yoffset+=SCREENWIDTH)
 	{
 	    if (y < viewwindowy || y >= viewwindowy + viewheight)
 		R_VideoErase(yoffset, SCREENWIDTH); // erase entire line

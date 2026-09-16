@@ -220,7 +220,10 @@ static int 	leveljuststarted = 1; 	// kluge until AM_LevelInit() is called
 
 boolean    	automapactive = false;
 static int 	finit_width = SCREENWIDTH;
-static int 	finit_height = SCREENHEIGHT - 32;
+// -32 is the classic status-bar-height-in-physical-pixels assumption;
+// UI_SCALE it so the automap correctly reserves the actual (scaled)
+// status bar height at the bottom of the screen (see doom/st_stuff.h).
+static int 	finit_height = SCREENHEIGHT - UI_SCALE(32);
 
 // location of window on screen
 static int 	f_x;
@@ -1317,7 +1320,10 @@ void AM_drawMarks(void)
 	    fx = CXMTOF(markpoints[i].x);
 	    fy = CYMTOF(markpoints[i].y);
 	    if (fx >= f_x && fx <= f_w - w && fy >= f_y && fy <= f_h - h)
-		V_DrawPatch(fx, fy, FB, marknums[i]);
+		// fx/fy are physical automap-frame pixel coordinates
+		// (CXMTOF/CYMTOF), not logical UI positions -- must not
+		// be scaled a second time.
+		V_DrawPatchPhysical(fx, fy, FB, marknums[i]);
 	}
     }
 

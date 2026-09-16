@@ -1330,7 +1330,8 @@ M_WriteText
 	}
 		
 	w = SHORT (hu_font[c]->width);
-	if (cx+w > SCREENWIDTH)
+	// cx/w are logical (320x200-space); wrap against logical BASE_WIDTH.
+	if (cx+w > BASE_WIDTH)
 	    break;
 	V_DrawPatchDirect(cx, cy, 0, hu_font[c]);
 	cx+=w;

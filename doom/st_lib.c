@@ -119,10 +119,16 @@ STlib_drawNum
     // clear the area
     x = n->x - numdigits*w;
 
-    if (n->y - ST_Y < 0)
-	I_Error("drawNum: n->y - ST_Y < 0");
+    if (n->y - ST_Y_LOGICAL < 0)
+	I_Error("drawNum: n->y - ST_Y_LOGICAL < 0");
 
-    V_CopyRect(x, n->y - ST_Y, BG, w*numdigits, h, x, n->y, FG);
+    // x/n->y/w/h are all logical (320x200-space) here; V_CopyRect itself
+    // is unscaled (it addresses screens[] directly, like ST_refreshBackground's
+    // own already-physical call), so UI_SCALE() each argument explicitly --
+    // see the comment on ST_Y_LOGICAL in st_stuff.h.
+    V_CopyRect(UI_SCALE(x), UI_SCALE(n->y - ST_Y_LOGICAL), BG,
+	       UI_SCALE(w*numdigits), UI_SCALE(h),
+	       UI_SCALE(x), UI_SCALE(n->y), FG);
 
     // if non-number, do not draw it
     if (num == 1994)
@@ -229,10 +235,12 @@ STlib_updateMultIcon
 	    w = SHORT(mi->p[mi->oldinum]->width);
 	    h = SHORT(mi->p[mi->oldinum]->height);
 
-	    if (y - ST_Y < 0)
-		I_Error("updateMultIcon: y - ST_Y < 0");
+	    if (y - ST_Y_LOGICAL < 0)
+		I_Error("updateMultIcon: y - ST_Y_LOGICAL < 0");
 
-	    V_CopyRect(x, y-ST_Y, BG, w, h, x, y, FG);
+	    V_CopyRect(UI_SCALE(x), UI_SCALE(y-ST_Y_LOGICAL), BG,
+		       UI_SCALE(w), UI_SCALE(h),
+		       UI_SCALE(x), UI_SCALE(y), FG);
 	}
 	V_DrawPatch(mi->x, mi->y, FG, mi->p[*mi->inum]);
 	mi->oldinum = *mi->inum;
@@ -278,13 +286,15 @@ STlib_updateBinIcon
 	w = SHORT(bi->p->width);
 	h = SHORT(bi->p->height);
 
-	if (y - ST_Y < 0)
-	    I_Error("updateBinIcon: y - ST_Y < 0");
+	if (y - ST_Y_LOGICAL < 0)
+	    I_Error("updateBinIcon: y - ST_Y_LOGICAL < 0");
 
 	if (*bi->val)
 	    V_DrawPatch(bi->x, bi->y, FG, bi->p);
 	else
-	    V_CopyRect(x, y-ST_Y, BG, w, h, x, y, FG);
+	    V_CopyRect(UI_SCALE(x), UI_SCALE(y-ST_Y_LOGICAL), BG,
+		       UI_SCALE(w), UI_SCALE(h),
+		       UI_SCALE(x), UI_SCALE(y), FG);
 
 	bi->oldval = *bi->val;
     }

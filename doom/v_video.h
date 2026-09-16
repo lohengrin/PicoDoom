@@ -76,6 +76,23 @@ V_DrawPatch
   patch_t*	patch);
 
 void
+V_DrawPatchFlipped
+( int		x,
+  int		y,
+  int		scrn,
+  patch_t*	patch);
+
+// Unscaled 1:1 patch draw for callers that already compute physical-pixel
+// coordinates themselves (view border/window-size code) -- see the comment
+// on V_DrawPatchPhysical's definition in v_video.c.
+void
+V_DrawPatchPhysical
+( int		x,
+  int		y,
+  int		scrn,
+  patch_t*	patch);
+
+void
 V_DrawPatchDirect
 ( int		x,
   int		y,

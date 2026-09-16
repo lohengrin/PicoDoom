@@ -56,8 +56,9 @@ rcsid[] = "$Id: r_draw.c,v 1.4 1997/02/03 16:47:55 b1 Exp $";
 #define MAXWIDTH			1120
 #define MAXHEIGHT			832
 
-// status bar height at bottom of screen
-#define SBARHEIGHT		32
+// status bar height at bottom of screen (physical pixels; UI_SCALE'd from
+// the classic 32, see doom/doomdef.h -- must match st_stuff.h's ST_HEIGHT)
+#define SBARHEIGHT		UI_SCALE(32)
 
 //
 // All drawing to the view buffer is accomplished in this file.
@@ -69,14 +70,26 @@ rcsid[] = "$Id: r_draw.c,v 1.4 1997/02/03 16:47:55 b1 Exp $";
 //
 
 
-byte*		viewimage; 
+byte*		viewimage;
 int		viewwidth;
 int		scaledviewwidth;
 int		viewheight;
 int		viewwindowx;
-int		viewwindowy; 
-byte*		ylookup[MAXHEIGHT]; 
-int		columnofs[MAXWIDTH]; 
+int		viewwindowy;
+// Pools are in PSRAM on PICO: each entry is read once per column/span
+// (dest = ylookup[dc_yl] + columnofs[dc_x], computed once then walked with
+// dest += SCREENWIDTH in the per-pixel loop -- not re-indexed per pixel),
+// so PSRAM latency only applies at column/span granularity. Frees SRAM the
+// native-resolution renderer tables (see doom/doomdef.h) needed. See
+// R_InitBuffer for the one-time alloc.
+#ifdef PICO
+extern void *psram_malloc (size_t);
+byte**		ylookup;
+int*		columnofs;
+#else
+byte*		ylookup[MAXHEIGHT];
+int		columnofs[MAXWIDTH];
+#endif
 
 // Color tables for different players,
 //  translate a limited part to another
@@ -801,14 +814,24 @@ void R_DrawSpanLow (void)
 void
 R_InitBuffer
 ( int		width,
-  int		height ) 
-{ 
-    int		i; 
+  int		height )
+{
+    int		i;
+
+#ifdef PICO
+    if (!ylookup)
+    {
+	ylookup = (byte **) psram_malloc (MAXHEIGHT * sizeof (*ylookup));
+	columnofs = (int *) psram_malloc (MAXWIDTH * sizeof (*columnofs));
+	if (!ylookup || !columnofs)
+	    I_Error ("R_InitBuffer: ylookup/columnofs pool alloc failed");
+    }
+#endif
 
     // Handle resize,
     //  e.g. smaller view windows
     //  with border and/or status bar.
-    viewwindowx = (SCREENWIDTH-width) >> 1; 
+    viewwindowx = (SCREENWIDTH-width) >> 1;
 
     // Column offset. For windows.
     for (i=0 ; i<width ; i++) 
@@ -850,7 +873,7 @@ void R_FillBackScreen (void)
 
     char*	name;
 	
-    if (scaledviewwidth == 320)
+    if (scaledviewwidth == SCREENWIDTH)
 	return;
 	
     if ( gamemode == commercial)
@@ -879,38 +902,38 @@ void R_FillBackScreen (void)
     patch = W_CacheLumpName ("brdr_t",PU_CACHE);
 
     for (x=0 ; x<scaledviewwidth ; x+=8)
-	V_DrawPatch (viewwindowx+x,viewwindowy-8,1,patch);
+	V_DrawPatchPhysical (viewwindowx+x,viewwindowy-8,1,patch);
     patch = W_CacheLumpName ("brdr_b",PU_CACHE);
 
     for (x=0 ; x<scaledviewwidth ; x+=8)
-	V_DrawPatch (viewwindowx+x,viewwindowy+viewheight,1,patch);
+	V_DrawPatchPhysical (viewwindowx+x,viewwindowy+viewheight,1,patch);
     patch = W_CacheLumpName ("brdr_l",PU_CACHE);
 
     for (y=0 ; y<viewheight ; y+=8)
-	V_DrawPatch (viewwindowx-8,viewwindowy+y,1,patch);
+	V_DrawPatchPhysical (viewwindowx-8,viewwindowy+y,1,patch);
     patch = W_CacheLumpName ("brdr_r",PU_CACHE);
 
     for (y=0 ; y<viewheight ; y+=8)
-	V_DrawPatch (viewwindowx+scaledviewwidth,viewwindowy+y,1,patch);
+	V_DrawPatchPhysical (viewwindowx+scaledviewwidth,viewwindowy+y,1,patch);
 
 
     // Draw beveled edge. 
-    V_DrawPatch (viewwindowx-8,
+    V_DrawPatchPhysical (viewwindowx-8,
 		 viewwindowy-8,
 		 1,
 		 W_CacheLumpName ("brdr_tl",PU_CACHE));
     
-    V_DrawPatch (viewwindowx+scaledviewwidth,
+    V_DrawPatchPhysical (viewwindowx+scaledviewwidth,
 		 viewwindowy-8,
 		 1,
 		 W_CacheLumpName ("brdr_tr",PU_CACHE));
     
-    V_DrawPatch (viewwindowx-8,
+    V_DrawPatchPhysical (viewwindowx-8,
 		 viewwindowy+viewheight,
 		 1,
 		 W_CacheLumpName ("brdr_bl",PU_CACHE));
     
-    V_DrawPatch (viewwindowx+scaledviewwidth,
+    V_DrawPatchPhysical (viewwindowx+scaledviewwidth,
 		 viewwindowy+viewheight,
 		 1,
 		 W_CacheLumpName ("brdr_br",PU_CACHE));

@@ -99,6 +99,26 @@ typedef enum
 // It will not work dynamically, see visplanes.
 //
 #define	BASE_WIDTH		320
+#define	BASE_HEIGHT		200
+
+// Uniform scale factor from the classic 320x200 "logical" UI coordinate
+// space (patch positions, status bar/HUD/menu layout constants -- all
+// authored assuming 320x200) to the build's actual physical SCREENWIDTH/
+// SCREENHEIGHT. Identity for hdmi (still 320x200); exact x3/2 for lcd
+// (480x300 is an exact uniform x3/2 scale of 320x200, see SCREENWIDTH/
+// SCREENHEIGHT above). UI_SCALE(v) converts one logical-space coordinate
+// or length to its physical equivalent; used by V_DrawPatch/V_DrawPatchFlipped
+// (doom/v_video.c) and by the handful of call sites elsewhere that need to
+// convert an already-logical value before feeding it to a physical-space
+// primitive (V_CopyRect, view-border sizing in doom/r_main.c/doom/r_draw.c).
+#ifdef PICODOOM_HDMI
+#define UI_SCALE_NUM 1
+#define UI_SCALE_DEN 1
+#else
+#define UI_SCALE_NUM 3
+#define UI_SCALE_DEN 2
+#endif
+#define UI_SCALE(v) (((v)*UI_SCALE_NUM)/UI_SCALE_DEN)
 
 // It is educational but futile to change this
 //  scaling e.g. to 2. Drawing of status bar,
@@ -110,10 +130,24 @@ typedef enum
 // Defines suck. C sucks.
 // C++ might sucks for OOP, but it sure is a better C.
 // So there.
+//
+// The hdmi build stays at vanilla 320x200 (its DVI canvas/TMDS encoding is
+// hardcoded around that, see src/i_video_dvi.cpp) -- only the lcd build goes
+// native. 480x300 is an *exact* uniform x3/2 scale of 320x200 (480/320=1.5,
+// 300/200=1.5) that reduces to the same 8:5 aspect ratio as INV_ASPECT_RATIO
+// below, so no view-geometry math changes are needed, and 2D UI patches
+// (status bar/HUD/menus) can use one clean x3/2 scale factor consistently
+// with the 3D view. The ILI9486 panel is physically 480x320; the leftover
+// 20 rows are a small top/bottom letterbox in the LCD driver's blit step.
+#ifdef PICODOOM_HDMI
 #define SCREENWIDTH  320
 //SCREEN_MUL*BASE_WIDTH //320
 #define SCREENHEIGHT 200
 //(int)(SCREEN_MUL*BASE_WIDTH*INV_ASPECT_RATIO) //200
+#else
+#define SCREENWIDTH  480
+#define SCREENHEIGHT 300
+#endif
 
 
 

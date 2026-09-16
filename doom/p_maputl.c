@@ -34,11 +34,16 @@ rcsid[] = "$Id: p_maputl.c,v 1.5 1997/02/03 22:45:11 b1 Exp $";
 #include "m_bbox.h"
 
 #include "doomdef.h"
+#include "i_system.h"
 #include "p_local.h"
 
 
 // State.
 #include "r_state.h"
+
+#ifdef PICO
+extern void *psram_malloc (size_t);
+#endif
 
 //
 // P_AproxDistance
@@ -541,7 +546,16 @@ P_BlockThingsIterator
 //
 // INTERCEPT ROUTINES
 //
+// Pool is in PSRAM on PICO: pure per-traversal scratch space (reset via
+// intercept_p = intercepts at the top of every P_PathTraverse call, game
+// logic frequency -- weapon fire/sightlines -- not the per-frame render
+// loop), so PSRAM latency doesn't matter here. Frees 12KB of SRAM that the
+// native-480x300 renderer tables (see doom/doomdef.h) needed.
+#ifdef PICO
+intercept_t*	intercepts;
+#else
 intercept_t	intercepts[MAXINTERCEPTS];
+#endif
 intercept_t*	intercept_p;
 
 divline_t 	trace;
@@ -790,8 +804,16 @@ P_PathTraverse
     int		count;
 		
     earlyout = flags & PT_EARLYOUT;
-		
+
     validcount++;
+#ifdef PICO
+    if (!intercepts)
+    {
+	intercepts = (intercept_t *) psram_malloc (MAXINTERCEPTS * sizeof (*intercepts));
+	if (!intercepts)
+	    I_Error ("P_PathTraverse: intercepts pool alloc failed");
+    }
+#endif
     intercept_p = intercepts;
 	
     if ( ((x1-bmaporgx)&(MAPBLOCKSIZE-1)) == 0)
