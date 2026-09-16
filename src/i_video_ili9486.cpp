@@ -1,13 +1,14 @@
 // Real video driver for the Pico port: replaces doom/i_video_null.c.
-// Blits DOOM's 320x200 palette-indexed screens[0] to the Waveshare 3.5"
-// ILI9486 LCD via Pico-Toolset's pico_toolset::Ili9486, 1:1 (no scaling), centered on the panel's
-// 480x320 landscape frame in an 80px/60px border -- see docs/PLAN.md
-// Phase 2. Was briefly upscaled 3:2 to fill the panel (320x200 -> 480x300),
-// reverted: SPI feed time turned out to scale with byte count as expected
-// (DMA vs. spi_write_blocking made no measurable difference -- the
-// bottleneck is bus throughput, not CPU-side overhead), so fewer bytes
-// wins until the achieved SPI clock is sorted out (see the one-shot log
-// in pico_toolset::Ili9486::set_window()). C++ driver behind a plain C
+// Blits DOOM's screens[0] (palette-indexed, native SCREENWIDTHxSCREENHEIGHT
+// -- 480x300, see doom/doomdef.h) to the Waveshare 3.5" ILI9486 LCD via
+// Pico-Toolset's pico_toolset::Ili9486, 1:1, centered on the panel's 480x320
+// landscape frame in a small top/bottom letterbox (kOffsetY, currently 10px
+// each side -- see docs/PLAN.md). An earlier 320x200 build tried a 3:2
+// blit-time upscale to fill the panel and reverted it (SPI feed time scales
+// with byte count, so more bytes was strictly worse at the time); this is a
+// different thing -- the engine itself now renders natively at 480x300 (see
+// doom/doomdef.h's UI_SCALE), so there's no upscale step here at all, just
+// the same 1:1 blit at a bigger native size. C++ driver behind a plain C
 // interface, same bridging pattern as src/PicoDoom.cpp.
 //
 // Phase 4.5 (performance): I_FinishUpdate() (core0) no longer does the
@@ -65,10 +66,18 @@
 // the caller's loop so tuh_task() still runs every iteration -- see
 // i_video_core1.hpp), no per-row chunking needed at all since there's no
 // conversion left to interleave with USB servicing.
-// NOT YET hardware-validated. If this regresses like Phase 5 did, the fix
-// is the same: revert to Phase 4.6.2's split memcpy (core0) + per-row
-// convert+DMA (core1), which is known-good at these clock speeds too
-// (measured ~18.7fps).
+// Hardware-validated (did not regress) at 320x200; still in place unchanged
+// through Phase 8's native-480x300 banding below, which just calls this
+// same fused convert loop once per band instead of once per frame.
+//
+// Phase 8 (2026-09, native 480x300, see doomdef.h): current measured floor
+// on this panel is ~12fps, core1-dma pinned ~99% -- i.e. genuinely SPI-bus-
+// bandwidth-bound (480*300*2 = 288000B/frame at this panel's 33MHz clean
+// ceiling is ~70ms of transfer time alone, a ~14.3fps hard cap regardless
+// of buffering strategy). Banding (kBandRows below) got buffers back into
+// SRAM and off the PSRAM-fallback path, but doesn't and can't beat this
+// bus-bandwidth ceiling -- the next real lever is the higher-SPI-clock
+// panel swap this native-resolution work was originally motivated by.
 #include "pico_toolset/ili9486.h"
 #include "pico_toolset/display_panel.h"
 #include "pico_toolset/psram.h"
@@ -166,23 +175,43 @@ void rebuild_rgb565_lut() {
     }
 }
 
-constexpr int kDstWidth = SCREENWIDTH;   // 320, 1:1 -- see file header
-constexpr int kDstHeight = SCREENHEIGHT; // 200
-constexpr int kOffsetX = (pico_toolset::Ili9486::kWidth - kDstWidth) / 2;   // 80
-constexpr int kOffsetY = (pico_toolset::Ili9486::kHeight - kDstHeight) / 2; // 60
-constexpr int kFramePixels = kDstWidth * kDstHeight;
+constexpr int kDstWidth = SCREENWIDTH;   // 480, native (see doom/doomdef.h)
+constexpr int kDstHeight = SCREENHEIGHT; // 300
+constexpr int kOffsetX = (pico_toolset::Ili9486::kWidth - kDstWidth) / 2;   // 0
+constexpr int kOffsetY = (pico_toolset::Ili9486::kHeight - kDstHeight) / 2; // 10
 
-// --- core0 -> core1 blit handoff (ping-pong, see file header) ---
-// I_FinishUpdate() converts screens[0] (palette-indexed) into whichever of
-// these is free, writing ready-to-DMA RGB565-wire pixels directly (Phase 6);
-// core1 just DMAs one straight from PSRAM to the panel, then flags that slot
-// free again. Both slots SRAM (newlib heap) since the Phase 7 (2026-09)
-// SRAM budget work: visplanes/viewangletox/vissprites moved out of .bss
-// into PSRAM (see doom/r_plane.c, r_main.c, r_things.c), funding the
-// 256000B that lands these two right back in SRAM -- the Phase 4.6.1 OOM
-// only happened because SRAM was still carrying those tables. I_InitGraphics
-// falls back to psram_malloc per slot if the heap is short, so a budget
-// miss degrades to the old layout instead of crashing the boot.
+// --- core0 -> core1 blit handoff (banded ping-pong) ---
+// Phase 8 (2026-09, native 480x300): two FULL-FRAME buffers (480*300*2 =
+// 288000B each) don't fit in SRAM at all -- bigger than the entire SRAM
+// heap budget outright, not just tight -- and I_InitGraphics's psram_malloc
+// fallback, while it keeps the boot alive, leaves core1 DMA'ing straight
+// out of PSRAM every frame, measured ~12fps with core1-dma pinned at
+// ~100%. Banding fixes this at the root: each buffer only ever holds
+// kBandRows rows (see kBandRows below), a small constant independent of
+// screen resolution, so both slots fit SRAM again regardless of how big
+// SCREENWIDTH/SCREENHEIGHT are. I_FinishUpdate() below now converts and
+// pushes one band at a time instead of the whole frame; i_video_core1_step()
+// DMAs one band at a time to a correspondingly small window on the panel.
+// Same ping-pong contract as before (g_blit_buf_free), just at band
+// granularity instead of frame granularity -- core0 blocks on a slot only
+// if core1's SPI feed hasn't drained that slot's *previous* band yet.
+// 20 rows (15 bands/frame) was tried first and measured WORSE on real
+// hardware (~9fps, core0-wait 60%) than the full-frame PSRAM fallback it
+// replaced (~9-12fps) -- each band pays pico_toolset::Ili9486::set_window()'s
+// full command sequence (CASET+PASET+RAMWR, 11 separate CS-toggle SPI
+// transactions at the 8MHz command baud, plus two spi_set_baudrate() calls
+// to switch to/from the pixel clock), and at 15 bands/frame that fixed
+// per-band cost was apparently big enough to outweigh what banding saved.
+// Total bytes moved over SPI per frame is unchanged by band count (that's
+// set by SCREENWIDTH*SCREENHEIGHT, not by this), so fewer/bigger bands
+// only pays down that per-call command overhead -- 100 rows (3 bands/frame)
+// cuts it 5x vs the 15-band attempt while still using far less SRAM
+// (96000B/buffer, 192000B total) than a full frame would (288000B/buffer).
+constexpr int kBandRows = 100;
+static_assert(kDstHeight % kBandRows == 0, "kBandRows must divide kDstHeight evenly");
+constexpr int kNumBands = kDstHeight / kBandRows;
+constexpr int kBandPixels = kDstWidth * kBandRows;
+
 uint16_t* g_screen_buf[2] = {nullptr, nullptr};
 // true = free for core0 to write screens[0]'s converted pixels into. Flip
 // conventions match PicoUsbKeyboard.cpp's g_active_buf: plain volatile
@@ -275,13 +304,42 @@ void I_InitGraphics(void) {
     // i_video_core1_step() immediately -- but g_blit_buf_free starts all-true
     // and the inter-core FIFO starts empty, so it just no-ops until
     // I_FinishUpdate() below ever pushes an index. Both slots SRAM (newlib
-    // malloc -- see g_screen_buf's doc comment), falling back per-slot to
-    // PSRAM if the heap is short so a budget miss degrades instead of OOM'ing
-    // the boot.
-    constexpr size_t kBlitBytes = kFramePixels * sizeof(uint16_t);
+    // malloc -- see g_screen_buf's doc comment): banding (Phase 8) keeps
+    // kBlitBytes a small constant (kBandRows worth of rows, not the whole
+    // frame) so this should always succeed on SRAM now regardless of
+    // SCREENWIDTH/SCREENHEIGHT -- but keep the PSRAM fallback as a defensive
+    // backstop.
+    //
+    // Don't just try malloc() and catch NULL: this SDK's pico_malloc wrapper
+    // has PICO_MALLOC_PANIC=1 by default (project doesn't override it, and
+    // shouldn't -- that panic is a genuinely useful diagnostic for a real
+    // unexpected OOM elsewhere), so a malloc() call that's going to fail
+    // panics immediately instead of returning NULL, and this function's own
+    // NULL-check/PSRAM-fallback code below never gets a chance to run --
+    // check headroom first and skip straight to psram_malloc() when there's
+    // clearly not enough room, instead of finding out via a panic.
+    //
+    // mallinfo()'s fordblks (free bytes already inside the newlib arena) is
+    // the WRONG thing to check here: this runs very early in boot (before
+    // WAD loading, one of the first mallocs at all), so the arena hasn't
+    // grown via sbrk() yet and fordblks reads near-zero even though sbrk()
+    // can still grow all the way up to __StackLimit -- using it made this
+    // always take the PSRAM path regardless of how small kBlitBytes got
+    // (confirmed on real hardware: still PSRAM-fallback after banding
+    // dropped kBlitBytes to ~19KB with 293KB actually free). uordblks (bytes
+    // actually allocated) minus the total SRAM heap budget is accurate
+    // regardless of arena growth state -- same computation report_stats_if_due
+    // uses for the "SRAM used/total" stats line.
+    constexpr size_t kBlitBytes = kBandPixels * sizeof(uint16_t);
     bool all_sram = true;
     for (uint16_t*& buf : g_screen_buf) {
-        buf = static_cast<uint16_t*>(malloc(kBlitBytes));
+        struct mallinfo mi = mallinfo();
+        size_t sram_total = static_cast<size_t>(&__StackLimit - &__bss_end__);
+        size_t sram_used = static_cast<size_t>(mi.uordblks);
+        size_t sram_free_estimate = sram_total > sram_used ? sram_total - sram_used : 0;
+        buf = (sram_free_estimate >= kBlitBytes)
+            ? static_cast<uint16_t*>(malloc(kBlitBytes))
+            : nullptr;
         if (!buf) {
             buf = static_cast<uint16_t*>(pico_toolset::psram_malloc(kBlitBytes));
             all_sram = false;
@@ -325,7 +383,7 @@ void I_SetPalette(byte* palette) {
 void I_UpdateNoBlit(void) {}
 
 void I_FinishUpdate(void) {
-    // Ping-pong: alternate which buffer this call targets. Static local
+    // Ping-pong: alternate which buffer each band targets. Static local
     // instead of a namespace global -- this function is the only writer,
     // nothing else needs to see it.
     static int next_idx = 0;
@@ -335,32 +393,39 @@ void I_FinishUpdate(void) {
         g_frame_us_in_window += frame_start_us - g_last_frame_start_us;
     g_last_frame_start_us = frame_start_us;
 
-    // Backpressure: only blocks if core1 hasn't finished DMA'ing this same
-    // buffer from two frames ago yet, i.e. if core1's SPI feed is the
-    // bottleneck rather than core0's game logic/render -- see g_wait_us's
-    // doc comment above.
-    uint64_t wait_start_us = frame_start_us;
-    while (!g_blit_buf_free[next_idx])
-        tight_loop_contents();
-    uint64_t convert_start_us = time_us_64();
-    g_wait_us_in_window += convert_start_us - wait_start_us;
-
     // screens[0] itself is never touched here (see file header) -- just
-    // read out. Fused copy+palette-to-RGB565 convert (Phase 6): one pass
-    // over the frame instead of a separate memcpy (here) and LUT loop
-    // (core1's, pre-Phase-6), each of which used to make their own full
-    // PSRAM pass. core1 reads its own ready-to-DMA copy from here on.
+    // read out. One band at a time (Phase 8, see g_screen_buf's doc
+    // comment): fused copy+palette-to-RGB565 convert (Phase 6) still does
+    // one pass per pixel, just kBandRows worth at a time instead of the
+    // whole frame, so both wait-for-slot backpressure and the SPI feed
+    // interleave at band granularity instead of once per frame.
     const byte* src = screens[0];
-    uint16_t* dst = g_screen_buf[next_idx];
-    for (int i = 0; i < kFramePixels; ++i)
-        dst[i] = g_rgb565_wire_lut[src[i]];
+    for (int band = 0; band < kNumBands; ++band) {
+        // Backpressure: only blocks if core1 hasn't finished DMA'ing this
+        // same slot's previous band yet, i.e. if core1's SPI feed is the
+        // bottleneck rather than core0's game logic/render -- see
+        // g_wait_us's doc comment above.
+        uint64_t wait_start_us = time_us_64();
+        while (!g_blit_buf_free[next_idx])
+            tight_loop_contents();
+        uint64_t convert_start_us = time_us_64();
+        g_wait_us_in_window += convert_start_us - wait_start_us;
+
+        const byte* band_src = src + static_cast<size_t>(band) * kBandPixels;
+        uint16_t* dst = g_screen_buf[next_idx];
+        for (int i = 0; i < kBandPixels; ++i)
+            dst[i] = g_rgb565_wire_lut[band_src[i]];
+        uint64_t convert_done_us = time_us_64();
+        g_convert_us_in_window += convert_done_us - convert_start_us;
+
+        g_blit_buf_free[next_idx] = false;
+        // Pack (band, slot) into one FIFO word -- i_video_core1_step()
+        // decodes both to pick the right window offset and free-flag.
+        multicore_fifo_push_blocking((static_cast<uint32_t>(band) << 1) | static_cast<uint32_t>(next_idx));
+        next_idx ^= 1;
+    }
+
     uint64_t now_us = time_us_64();
-    g_convert_us_in_window += now_us - convert_start_us;
-
-    g_blit_buf_free[next_idx] = false;
-    multicore_fifo_push_blocking(static_cast<uint32_t>(next_idx));
-    next_idx ^= 1;
-
     ++g_frames_in_window;
     report_stats_if_due(now_us);
 }
@@ -447,11 +512,14 @@ void i_video_core1_step() {
     if (g_blit_state == BlitState::Idle) {
         if (!multicore_fifo_rvalid())
             return;
-        g_blit_idx = static_cast<int>(multicore_fifo_pop_blocking());
-        g_panel.set_window(kOffsetX, kOffsetY,
-                            kOffsetX + kDstWidth - 1, kOffsetY + kDstHeight - 1);
+        uint32_t word = multicore_fifo_pop_blocking();
+        g_blit_idx = static_cast<int>(word & 1u);
+        int band = static_cast<int>(word >> 1);
+        int y0 = kOffsetY + band * kBandRows;
+        g_panel.set_window(kOffsetX, y0,
+                            kOffsetX + kDstWidth - 1, y0 + kBandRows - 1);
         g_dma_start_us = time_us_64();
-        g_panel.start_pixels_dma(std::span<const uint16_t>(g_screen_buf[g_blit_idx], kFramePixels));
+        g_panel.start_pixels_dma(std::span<const uint16_t>(g_screen_buf[g_blit_idx], kBandPixels));
         g_blit_state = BlitState::Transferring;
         return;
     }
