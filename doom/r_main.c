@@ -745,9 +745,22 @@ void R_ExecuteSetViewSize (void)
 	
     R_InitTextureMapping ();
     
-    // psprite scales
-    pspritescale = FRACUNIT*viewwidth/SCREENWIDTH;
-    pspriteiscale = FRACUNIT*SCREENWIDTH/viewwidth;
+    // psprite scales. viewwidth/SCREENWIDTH normalizes to exactly 1.0 at
+    // fullscreen (setblocks==11) regardless of SCREENWIDTH's absolute value
+    // -- correct for vanilla's windowed-view feature (weapon stays the same
+    // apparent size as the 3D view shrinks), but it means these two never
+    // reflect UI_SCALE's native-resolution scale-up on their own: the
+    // BASEYCENTER/160-based texturemid math in doom/r_things.c's
+    // R_ProjectSprite (weapon sprite) is deliberately expressed in unscaled
+    // logical-320 units, converted to native screen pixels by being
+    // multiplied through pspritescale/divided through pspriteiscale
+    // (R_DrawVisSprite's sprtopscreen = centeryfrac - FixedMul(texturemid,
+    // scale)) -- so UI_SCALE has to be folded in here, not there, or the
+    // weapon renders at its raw unscaled pixel size (too small, with a
+    // resulting gap above the now-lower/bigger status bar) instead of
+    // matching the rest of the UI_SCALE'd UI.
+    pspritescale = UI_SCALE(FRACUNIT)*viewwidth/SCREENWIDTH;
+    pspriteiscale = FRACUNIT*SCREENWIDTH*UI_SCALE_DEN/(viewwidth*UI_SCALE_NUM);
     
     // thing clipping
     for (i=0 ; i<viewwidth ; i++)
