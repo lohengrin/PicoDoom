@@ -22,6 +22,12 @@ void pico_wad_select(const char* name);
 // selection before the fixed-name scan would run.
 int pico_wad_gamemode(const char* name);
 
+// 1 if `name` looks like a Doom-family IWAD (Doom/Doom II/Ultimate/Freedoom/
+// TNT/Plutonia), 0 if it looks like a Raven IWAD (Heretic/Hexen, detected via
+// the TINTTAB lump) that this Doom-only engine has no game logic for. Callers
+// should refuse to load a 0 rather than let it crash deep in the renderer.
+int pico_wad_is_doom_family(const char* name);
+
 // Last menu selection persisted in default.cfg ("picodoom_lastwad"), or ""
 // when absent. Read once, cached.
 const char* pico_wad_last(void);

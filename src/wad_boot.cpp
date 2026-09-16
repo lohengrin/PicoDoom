@@ -120,6 +120,62 @@ int sniff_gamemode(const char* name)
     return commercial;
 }
 
+// This engine (doom/) is a stock Doom-only linuxdoom port: no Heretic/Hexen
+// game logic, switch tables, or renderer support exist anywhere in the tree.
+// sniff_gamemode() only tells Doom episodes apart from each other -- it
+// can't tell a Doom-family IWAD from a Raven one, since Hexen's MAP01..
+// naming collides with Doom II's and Heretic's ExMy naming collides with
+// Doom 1's. Both would otherwise sail through IdentifyVersion() and crash
+// deep in P_InitSwitchList() (R_TextureNumForName: SW1BRCOM not found) --
+// confusing, and far from where the real problem (unsupported IWAD) is.
+//
+// TINTTAB is a translucency lookup table lump Raven added for Heretic and
+// Hexen; no Doom-family IWAD (Doom, Doom II, Ultimate Doom, Freedoom, TNT,
+// Plutonia) carries it. Its presence is a reliable "not a Doom IWAD" flag.
+bool sniff_is_doom_family(const char* name)
+{
+    FILE* f = fopen(name, "rb");
+    if (!f)
+        return true; // let the caller's own access()/fopen() report the real error
+
+    uint8_t magic[4];
+    uint8_t counts[8];
+    if (fread(magic, 1, 4, f) != 4 || memcmp(magic, "IWAD", 4) != 0 ||
+        fread(counts, 1, 8, f) != 8) {
+        fclose(f);
+        return true;
+    }
+    const uint32_t numlumps =
+        static_cast<uint32_t>(counts[0]) | static_cast<uint32_t>(counts[1]) << 8 |
+        static_cast<uint32_t>(counts[2]) << 16 | static_cast<uint32_t>(counts[3]) << 24;
+    const uint32_t dirpos =
+        static_cast<uint32_t>(counts[4]) | static_cast<uint32_t>(counts[5]) << 8 |
+        static_cast<uint32_t>(counts[6]) << 16 | static_cast<uint32_t>(counts[7]) << 24;
+    if (numlumps > 1u << 20) {
+        fclose(f);
+        return true;
+    }
+
+    bool tinttab = false;
+    constexpr uint32_t kBatch = 256;
+    uint8_t entry[16];
+    for (uint32_t base = 0; base < numlumps && !tinttab;) {
+        const uint32_t n = (numlumps - base) < kBatch ? (numlumps - base) : kBatch;
+        if (fseek(f, static_cast<long>(dirpos) + static_cast<long>(base) * 16L, SEEK_SET) != 0)
+            break;
+        for (uint32_t i = 0; i < n && fread(entry, 1, 16, f) == 16; ++i) {
+            const char* en = reinterpret_cast<const char*>(entry + 8);
+            if (lump_name_is(en, "TINTTAB", 7)) {
+                tinttab = true;
+                break;
+            }
+        }
+        base += n;
+    }
+    fclose(f);
+    return !tinttab;
+}
+
 void read_last_from_cfg()
 {
     g_last[0] = '\0';
@@ -170,6 +226,11 @@ extern "C" void pico_wad_select(const char* name)
 extern "C" int pico_wad_gamemode(const char* name)
 {
     return sniff_gamemode(name);
+}
+
+extern "C" int pico_wad_is_doom_family(const char* name)
+{
+    return sniff_is_doom_family(name) ? 1 : 0;
 }
 
 extern "C" const char* pico_wad_last(void)

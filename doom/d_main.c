@@ -656,10 +656,19 @@ void IdentifyVersion(void)
 	{
 		extern const char *pico_selected_wad(void);
 		extern int pico_wad_gamemode(const char *name);
+		extern int pico_wad_is_doom_family(const char *name);
 
 		const char *pico_sel = pico_selected_wad();
 		if (pico_sel && pico_sel[0] && !access(pico_sel, R_OK))
 		{
+			// This engine has no Heretic/Hexen game logic at all (switch
+			// tables, sound code, status bar, renderer are all Doom-only).
+			// Letting one through here would crash confusingly, deep in
+			// P_InitSwitchList (R_TextureNumForName: SW1BRCOM not found).
+			// Fail clean and immediately instead.
+			if (!pico_wad_is_doom_family(pico_sel))
+				I_Error("Unsupported IWAD '%s': this engine only supports Doom/Doom II IWADs (Heretic/Hexen are not implemented)", pico_sel);
+
 			gamemode = pico_wad_gamemode(pico_sel);
 			D_AddFile((char *)pico_sel);
 			return;
