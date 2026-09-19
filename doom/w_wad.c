@@ -51,6 +51,10 @@ rcsid[] = "$Id: w_wad.c,v 1.5 1997/02/03 16:47:57 b1 Exp $";
 #include "w_wad.h"
 
 #ifdef PICO
+#include "i_frame_stats.hpp"
+#endif
+
+#ifdef PICO
 // This target's ~512KB SRAM has only ~170KB free after DOOM's static
 // tables (same reasoning as doom/i_system.c's I_ZoneBase/I_AllocLow
 // PSRAM-backing comment) -- the WAD directory buffer (W_AddFile/W_Reload's
@@ -569,8 +573,11 @@ W_CacheLumpNum
     if (!lumpcache[lump])
     {
 	// read the lump in
-	
+
 	//printf ("cache miss on lump %i\n",lump);
+#ifdef PICO
+	i_frame_stats_inc_wad_cache_miss ();
+#endif
 	ptr = Z_Malloc (W_LumpLength (lump), tag, &lumpcache[lump]);
 	W_ReadLump (lump, lumpcache[lump]);
     }

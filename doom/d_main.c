@@ -67,6 +67,7 @@ static const char rcsid[] = "$Id: d_main.c,v 1.8 1997/02/03 22:45:09 b1 Exp $";
 #include "i_system.h"
 #include "i_sound.h"
 #include "i_video.h"
+#include "i_frame_stats.hpp"
 
 #include "g_game.h"
 
@@ -228,6 +229,8 @@ void D_Display(void)
 		HU_Erase();
 
 	// do buffered drawing
+	{
+	uint64_t d2d_start_us = i_frame_stats_now_us();
 	switch (gamestate)
 	{
 	case GS_LEVEL:
@@ -255,14 +258,19 @@ void D_Display(void)
 		D_PageDrawer();
 		break;
 	}
+	i_frame_stats_add_draw2d_us(i_frame_stats_now_us() - d2d_start_us);
+	}
 
 	// draw buffered stuff to screen
 	I_UpdateNoBlit();
 
-	// draw the view directly
+	// draw the view directly -- R_RenderPlayerView() instruments its own
+	// bsp_walls/planes/sprites phases internally (see doom/r_main.c)
 	if (gamestate == GS_LEVEL && !automapactive && gametic)
 		R_RenderPlayerView(&players[displayplayer]);
 
+	{
+	uint64_t d2d_start_us = i_frame_stats_now_us();
 	if (gamestate == GS_LEVEL && gametic)
 		HU_Drawer();
 
@@ -307,6 +315,8 @@ void D_Display(void)
 
 	// menus go directly to the screen
 	M_Drawer();	 // menu is drawn even on top of everything
+	i_frame_stats_add_draw2d_us(i_frame_stats_now_us() - d2d_start_us);
+	}
 	NetUpdate(); // send out any new accumulation
 
 	// normal update
@@ -362,6 +372,8 @@ void D_DoomLoop(void)
 		I_StartFrame();
 
 		// process one or more tics
+		{
+		uint64_t tic_start_us = i_frame_stats_now_us();
 		if (singletics)
 		{
 			I_StartTic();
@@ -377,6 +389,8 @@ void D_DoomLoop(void)
 		else
 		{
 			TryRunTics(); // will run at least one tic
+		}
+		i_frame_stats_add_tic_us(i_frame_stats_now_us() - tic_start_us);
 		}
 
 		S_UpdateSounds(players[consoleplayer].mo); // move positional sounds

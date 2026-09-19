@@ -276,6 +276,7 @@ endif()
 add_executable(PicoDoom
 src/PicoDoom.cpp
 src/sd_stdio.cpp
+src/i_frame_stats.cpp
 ${PICODOOM_VIDEO_SRC}
 src/i_input_usbhid.cpp
 src/i_serial_console.cpp

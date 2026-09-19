@@ -91,6 +91,7 @@ extern "C" {
 }
 #include "pico_toolset/psram.h"
 #include "i_video_dvi.hpp"
+#include "i_frame_stats.hpp"
 
 extern "C" {
 #include "doomdef.h"
@@ -244,10 +245,20 @@ void report_stats_if_due(uint64_t now_us) {
     size_t psram_used = pico_toolset::psram_used_bytes();
     size_t psram_total = pico_toolset::psram_status().size_bytes;
 
-    printf("PicoDoom: SRAM %u/%uKB  PSRAM %u/%uKB  FPS %.1f  core0-convert %.0f%%\n",
+    float tic_pct = 0.0f, render3d_pct = 0.0f, draw2d_pct = 0.0f;
+    float bsp_walls_pct = 0.0f, planes_pct = 0.0f, sprites_pct = 0.0f;
+    i_frame_stats_take(elapsed_us, &tic_pct, &render3d_pct, &draw2d_pct,
+                        &bsp_walls_pct, &planes_pct, &sprites_pct);
+    uint32_t wad_cache_misses = i_frame_stats_take_wad_cache_misses();
+
+    printf("PicoDoom: SRAM %u/%uKB  PSRAM %u/%uKB  FPS %.1f  core0-convert %.0f%%  "
+           "tic %.0f%%  render3d %.0f%% (bsp+walls %.0f%%  planes %.0f%%  sprites %.0f%%)  draw2d %.0f%%  "
+           "wad-cache-miss %u/10s\n",
            static_cast<unsigned>(sram_used / 1024), static_cast<unsigned>(sram_total / 1024),
            static_cast<unsigned>(psram_used / 1024), static_cast<unsigned>(psram_total / 1024),
-           fps, convert_pct);
+           fps, convert_pct, tic_pct, render3d_pct,
+           bsp_walls_pct, planes_pct, sprites_pct, draw2d_pct,
+           static_cast<unsigned>(wad_cache_misses));
 
     g_stats_window_start_us = now_us;
     g_frames_in_window = 0;

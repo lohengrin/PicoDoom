@@ -40,6 +40,8 @@ static const char rcsid[] = "$Id: r_main.c,v 1.5 1997/02/03 22:45:12 b1 Exp $";
 #include "r_local.h"
 #include "r_sky.h"
 
+#include "i_frame_stats.hpp"
+
 #ifdef PICO
 extern void *psram_malloc (size_t);
 #endif
@@ -920,19 +922,33 @@ void R_RenderPlayerView (player_t* player)
     // check for new console commands.
     NetUpdate ();
 
-    // The head node is the last node output.
+    // The head node is the last node output. Classic linuxdoom draws wall
+    // columns interleaved with the BSP walk itself (not a separate pass),
+    // so this one span covers both.
+    {
+    uint64_t bsp_start_us = i_frame_stats_now_us();
     R_RenderBSPNode (numnodes-1);
-    
-    // Check for new console commands.
-    NetUpdate ();
-    
-    R_DrawPlanes ();
-    
-    // Check for new console commands.
-    NetUpdate ();
-    
-    R_DrawMasked ();
+    i_frame_stats_add_bsp_walls_us (i_frame_stats_now_us() - bsp_start_us);
+    }
 
     // Check for new console commands.
-    NetUpdate ();				
+    NetUpdate ();
+
+    {
+    uint64_t planes_start_us = i_frame_stats_now_us();
+    R_DrawPlanes ();
+    i_frame_stats_add_planes_us (i_frame_stats_now_us() - planes_start_us);
+    }
+
+    // Check for new console commands.
+    NetUpdate ();
+
+    {
+    uint64_t sprites_start_us = i_frame_stats_now_us();
+    R_DrawMasked ();
+    i_frame_stats_add_sprites_us (i_frame_stats_now_us() - sprites_start_us);
+    }
+
+    // Check for new console commands.
+    NetUpdate ();
 }
