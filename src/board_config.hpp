@@ -77,15 +77,20 @@ inline pico_toolset::Ili9486Config ili9486_config() {
 #ifdef PICODOOM_ST7796
 inline pico_toolset::St7796Config st7796_config() {
     pico_toolset::St7796Config c = pico_toolset::configs::st7796::kWaveshareRp2350PiZero;
-    // First implementation: keep the same achieved rate the validated
-    // ILI9486 preset runs at on this exact board/clock (264MHz clk_sys --
-    // see ili9486_config() above for the divisor math, identical here since
-    // both panels share clk_peri). This panel's spec ceiling is 125MHz;
-    // raise this once bench-tested on real hardware, the same way
-    // ili9486_config()'s rate was found -- see
-    // i_video_set_pixel_clock_hz() (src/i_video_st7796.cpp) for live tuning
-    // without a reflash.
-    c.spi_freq_hz = 33'333'333;
+    // Bench-tested on real hardware (2026-09) via the serial console's
+    // live `pclk` tuning (i_video_set_pixel_clock_hz(),
+    // src/i_video_st7796.cpp) -- confirmed clean (no artifacts) all the way
+    // up to 132MHz, which is the fastest rate reachable at all from this
+    // build's 264MHz clk_peri (SPI's divisor floor is 2: prescale=2,
+    // postdiv=1 -- see ili9486_config()'s comment for the same divisor
+    // math). That's ~5.6% above this panel's own datasheet ceiling
+    // (125MHz) but confirmed artifact-free, so kept as the default by
+    // instruction. Requesting the exact validated number (not an
+    // unbounded "as fast as possible" value) means this stays correct if
+    // clk_peri is ever raised later -- spi_set_baudrate() would then find a
+    // divisor landing closer to this same 132MHz instead of silently
+    // exceeding the validated ceiling.
+    c.spi_freq_hz = 132'000'000;
     return c;
 }
 #endif
