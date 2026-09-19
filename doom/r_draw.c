@@ -126,9 +126,12 @@ int			dccount;
 // 
 #ifdef PICO
 // Single hottest inner loop in the renderer (see the #ifdef PICO comment
-// inside, on the reload-caching already applied here) -- keep it out of
-// flash entirely so per-pixel instruction fetches don't pay XIP latency,
-// 2026-09 performance work. Untested on real hardware as of this comment.
+// inside, on the reload-caching and merged-lookup-table optimizations
+// applied here) -- keep it out of flash entirely so per-pixel instruction
+// fetches don't pay XIP latency, 2026-09 performance work. Confirmed via
+// the frame-phase stats breakdown (src/i_frame_stats.hpp) that this
+// function (via R_RenderBSPNode's "bsp+walls" bucket) is real hardware's
+// single largest per-frame cost at native 480x300 -- ~40% of every frame.
 void __not_in_flash_func(R_DrawColumn) (void)
 #else
 void R_DrawColumn (void)
@@ -150,6 +153,27 @@ void R_DrawColumn (void)
     // just applied to the version that's actually active.
     const byte* source = dc_source;
     const lighttable_t* colormap = dc_colormap;
+    // colormap[source[i]] is two DEPENDENT indexed loads per pixel -- the
+    // second load's address isn't known until the first completes. On an
+    // in-order core (Cortex-M33, no out-of-order execution) that's a
+    // pipeline stall every single pixel, and it's the dominant cost of this
+    // whole function (confirmed via the frame-phase stats breakdown,
+    // 2026-09 performance work: bsp+walls -- almost entirely this loop --
+    // is ~40% of every frame at native 480x300, more than every other
+    // render/game-logic phase combined). source[] only ever has 128 valid
+    // indices (see the &127 mask below), so above a length threshold it's
+    // cheaper to pay that same two-load cost 128 times up front and fold
+    // it into a table, then walk the rest of the column with a SINGLE load
+    // per pixel. Threshold is comfortably below 128 so the break-even point
+    // (precomputing costs about as much as 128 iterations of the original
+    // loop) is reached before a qualifying column ends; short/distant
+    // columns skip this and keep the original direct double-lookup, since
+    // paying the fixed 128-entry cost wouldn't be worth it for them. Native
+    // 480x300 rendering (view height scaled 1.5x from the original 200px)
+    // pushed meaningfully more columns above this threshold than at the
+    // original resolution, which is why this matters now.
+    byte merged[128];
+    int use_merged;
 #endif
 
     count = dc_yh - dc_yl;
@@ -178,20 +202,51 @@ void R_DrawColumn (void)
     // Inner loop that does the actual texture mapping,
     //  e.g. a DDA-lile scaling.
     // This is as fast as it gets.
+#ifdef PICO
+    // Confirmed on real hardware (2026-09, SWD sampling profiler) that
+    // forcing this unconditionally is a real regression (FPS 22.1->20.9,
+    // bsp+walls 44%->46%): most columns in actual gameplay are shorter
+    // than the break-even point, so paying the fixed 128-entry precompute
+    // on every column -- even short ones that never needed it -- is pure
+    // overhead more often than it's a win. The threshold below is the
+    // right design, not a premature-optimization guess.
+    use_merged = count >= 96;
+    if (use_merged)
+    {
+	int i;
+	for (i = 0; i < 128; i++)
+	    merged[i] = colormap[source[i]];
+
+	do
+	{
+	    *dest = merged[(frac>>FRACBITS)&127];
+	    dest += SCREENWIDTH;
+	    frac += fracstep;
+	} while (count--);
+    }
+    else
+    {
+	do
+	{
+	    // Re-map color indices from wall texture column
+	    //  using a lighting/special effects LUT.
+	    *dest = colormap[source[(frac>>FRACBITS)&127]];
+	    dest += SCREENWIDTH;
+	    frac += fracstep;
+	} while (count--);
+    }
+#else
     do
     {
 	// Re-map color indices from wall texture column
 	//  using a lighting/special effects LUT.
-#ifdef PICO
-	*dest = colormap[source[(frac>>FRACBITS)&127]];
-#else
 	*dest = dc_colormap[dc_source[(frac>>FRACBITS)&127]];
-#endif
 
 	dest += SCREENWIDTH;
 	frac += fracstep;
 
     } while (count--);
+#endif
 }
 
 
@@ -270,46 +325,82 @@ void R_DrawColumnLow (void)
     // See R_DrawColumn's #ifdef PICO comment -- same reload, same fix.
     const byte* source = dc_source;
     const lighttable_t* colormap = dc_colormap;
+    // See R_DrawColumn's #ifdef PICO comment -- same merged-table fix,
+    // same threshold (this loop writes two bytes per iteration instead of
+    // one, but the merge itself and its break-even point are unchanged).
+    byte merged[128];
+    int use_merged;
 #endif
 
     count = dc_yh - dc_yl;
 
     // Zero length.
-    if (count < 0) 
-	return; 
-				 
-#ifdef RANGECHECK 
+    if (count < 0)
+	return;
+
+#ifdef RANGECHECK
     if ((unsigned)dc_x >= SCREENWIDTH
 	|| dc_yl < 0
 	|| dc_yh >= SCREENHEIGHT)
     {
-	
+
 	I_Error ("R_DrawColumn: %i to %i at %i", dc_yl, dc_yh, dc_x);
     }
-    //	dccount++; 
-#endif 
+    //	dccount++;
+#endif
     // Blocky mode, need to multiply by 2.
     dc_x <<= 1;
-    
+
     dest = ylookup[dc_yl] + columnofs[dc_x];
     dest2 = ylookup[dc_yl] + columnofs[dc_x+1];
-    
-    fracstep = dc_iscale; 
+
+    fracstep = dc_iscale;
     frac = dc_texturemid + (dc_yl-centery)*fracstep;
-    
+
+#ifdef PICO
+    // See R_DrawColumn's comment: the >=96 threshold is confirmed correct
+    // on real hardware, not a premature-optimization guess -- forcing this
+    // unconditionally is a measured regression.
+    use_merged = count >= 96;
+    if (use_merged)
+    {
+	int i;
+	for (i = 0; i < 128; i++)
+	    merged[i] = colormap[source[i]];
+
+	do
+	{
+	    // Hack. Does not work corretly.
+	    *dest2 = *dest = merged[(frac>>FRACBITS)&127];
+	    dest += SCREENWIDTH;
+	    dest2 += SCREENWIDTH;
+	    frac += fracstep;
+
+	} while (count--);
+    }
+    else
+    {
+	do
+	{
+	    // Hack. Does not work corretly.
+	    *dest2 = *dest = colormap[source[(frac>>FRACBITS)&127]];
+	    dest += SCREENWIDTH;
+	    dest2 += SCREENWIDTH;
+	    frac += fracstep;
+
+	} while (count--);
+    }
+#else
     do
     {
 	// Hack. Does not work corretly.
-#ifdef PICO
-	*dest2 = *dest = colormap[source[(frac>>FRACBITS)&127]];
-#else
 	*dest2 = *dest = dc_colormap[dc_source[(frac>>FRACBITS)&127]];
-#endif
 	dest += SCREENWIDTH;
 	dest2 += SCREENWIDTH;
 	frac += fracstep;
 
     } while (count--);
+#endif
 }
 
 
