@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -30,6 +31,14 @@ char g_last[16];
 bool g_last_loaded = false;
 
 constexpr const char* kCfgKey = "picodoom_lastwad";
+constexpr const char* kHiresKey = "picodoom_hires";
+// 480x300 by default on the ST7796 panel (faster SPI, bigger screen);
+// ILI9486 keeps the original 320x200.
+#ifdef PICODOOM_ST7796
+constexpr int kHiresDefault = 1;
+#else
+constexpr int kHiresDefault = 0;
+#endif
 
 // A WAD directory's 8-byte lump-name field is padded with NULs (id's own
 // tools) or spaces (some third-party WADs); FAT-side we can't tell which
@@ -203,6 +212,7 @@ void read_last_from_cfg()
 } // namespace
 
 extern "C" char* pico_last_wad = nullptr;
+extern "C" int pico_hires = 0;
 
 extern "C" const char* pico_selected_wad(void)
 {
@@ -242,12 +252,11 @@ extern "C" const char* pico_wad_last(void)
     return g_last;
 }
 
-extern "C" void pico_wad_save_last(const char* name)
+namespace {
+
+// Slot `line` (a full `key\t\tvalue\n` entry) into default.cfg under `key`.
+void save_cfg_line(const char* cfg_key, const char* line)
 {
-    if (name == nullptr)
-        return;
-    char line[64];
-    snprintf(line, sizeof(line), "%s\t\t\"%s\"\n", kCfgKey, name);
 
     // Keep everything else the defaults file already carries; just slot this
     // key in (replace an existing line, append if absent). Reads whole-file
@@ -270,7 +279,7 @@ extern "C" void pico_wad_save_last(const char* name)
         fclose(f);
     }
 
-    std::string key(kCfgKey);
+    std::string key(cfg_key);
     FILE* f = fopen("default.cfg", "w");
     if (!f)
         return; // engine's own M_SaveDefaults does the same silent return
@@ -287,4 +296,40 @@ extern "C" void pico_wad_save_last(const char* name)
     if (!replaced)
         fputs(line, f);
     fclose(f);
+}
+
+} // namespace
+
+extern "C" void pico_wad_save_last(const char* name)
+{
+    if (name == nullptr)
+        return;
+    char line[64];
+    snprintf(line, sizeof(line), "%s\t\t\"%s\"\n", kCfgKey, name);
+    save_cfg_line(kCfgKey, line);
+}
+
+// Same `key\t\t<int>` layout the engine's M_SaveDefaults() writes for ints.
+extern "C" int pico_hires_setting(void)
+{
+    int val = kHiresDefault;
+    if (FILE* f = fopen("default.cfg", "r")) {
+        char key[80];
+        char rest[100];
+        while (fscanf(f, "%79s %[^\n]\n", key, rest) == 2) {
+            if (strcmp(key, kHiresKey) == 0) {
+                val = atoi(rest) != 0;
+                break;
+            }
+        }
+        fclose(f);
+    }
+    return val;
+}
+
+extern "C" void pico_hires_save(int hires)
+{
+    char line[48];
+    snprintf(line, sizeof(line), "%s\t\t%d\n", kHiresKey, hires ? 1 : 0);
+    save_cfg_line(kHiresKey, line);
 }

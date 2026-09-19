@@ -225,6 +225,9 @@ extern char*	chat_macros[];
 // (src/wad_boot.cpp); M_SaveDefaults()/M_LoadDefaults() persist it as
 // `picodoom_lastwad` so the menu can pre-highlight it on next boot.
 extern char*	pico_last_wad;
+// LCD 480x300 toggle (src/wad_boot.cpp); kept in the table so the clean-quit
+// re-save doesn't drop the key.
+extern int	pico_hires;
 #endif
 
 
@@ -290,6 +293,11 @@ default_t	defaults[] =
     {"key_strafe",&key_strafe, KEY_RALT},
     {"key_speed",&key_speed, KEY_RSHIFT},
     {"picodoom_lastwad", (int *) &pico_last_wad, (int) ""},
+#ifdef PICODOOM_ST7796
+    {"picodoom_hires", &pico_hires, 1},
+#else
+    {"picodoom_hires", &pico_hires, 0},
+#endif
 #endif
 
 #ifdef LINUX

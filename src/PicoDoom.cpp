@@ -3,6 +3,7 @@
 // (PSRAM, uSD out of which the WAD is loaded via the sd_stdio.c syscall
 // shim), then hands over to the engine.
 #include <cstdio>
+#include "wad_boot.hpp"
 #include "pico/stdlib.h"
 #include "hardware/clocks.h"
 #include "hardware/vreg.h"
@@ -17,6 +18,9 @@ extern "C" {
 #include "pico_toolset/fault_handler.h"
 #include "board_config.hpp"
 extern "C" bool sd_init(void);
+#ifndef PICODOOM_HDMI
+extern "C" void i_video_lcd_set_hires(int hires); // src/i_video_{ili9486,st7796}.cpp
+#endif
 extern "C" bool wad_menu_run(bool sd_available); // src/wad_menu.cpp (Phase 4 boot WAD-selection menu)
 #ifndef PICODOOM_HDMI
 extern "C" void usb_hid_core1_init(void); // src/i_input_usbhid.cpp
@@ -188,7 +192,13 @@ int main(void)
     // the uSD root and lets the user pick, persist and auto-start the last
     // one (see src/wad_menu.cpp). IdentifyVersion() reads the choice from
     // wad_boot.cpp before its fixed-name scan (doom/d_main.c, #ifdef PICO).
+    // pico_hires starts at 0 (BSS); seed it with the persisted/default value
+    // so the no-uSD path (no checkbox) still picks the right mode.
+    pico_hires = pico_hires_setting();
     wad_menu_run(sd_available);
+#ifndef PICODOOM_HDMI
+    i_video_lcd_set_hires(pico_hires);
+#endif
 
     // Engine globals (m_argv.c); no command-line parameters for now --
     // IdentifyVersion finds the WAD (doom1.wad/doom.wad/... ) on the SD root.

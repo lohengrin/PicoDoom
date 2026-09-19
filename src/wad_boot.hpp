@@ -38,9 +38,15 @@ const char* pico_wad_last(void);
 // boot; M_SaveDefaults() re-saves it in full on clean quit.
 void pico_wad_save_last(const char* name);
 
+// LCD "high res" (480x300) setting persisted in default.cfg as
+// "picodoom_hires" (0/1). Build default when absent: 1 on ST7796, 0 on ILI9486.
+int pico_hires_setting(void);
+void pico_hires_save(int hires);
+
 // Mutable target of doom/m_misc.c's "picodoom_lastwad" defaults[] entry
 // (declared there as `extern char* pico_last_wad;` under #ifdef PICO).
 extern char* pico_last_wad;
+extern int pico_hires; // mirror of the "picodoom_hires" defaults[] entry
 
 #ifdef __cplusplus
 }

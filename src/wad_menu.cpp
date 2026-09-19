@@ -325,6 +325,22 @@ extern "C" bool wad_menu_run(bool sd_available)
         lv_group_add_obj(group, reboot_btn);
     }
 
+#ifndef PICODOOM_HDMI
+    // LCD builds: "High res" (480x300 vs 320x200) toggle, bottom-left on the
+    // same baseline/font as the hint text. Meaningless without a uSD card
+    // (the menu only offers Reboot then), so hidden in that mode.
+    lv_obj_t* hires_cb = nullptr;
+    if (sd_available) {
+        hires_cb = lv_checkbox_create(scr);
+        lv_checkbox_set_text_static(hires_cb, "High res");
+        lv_obj_set_style_text_font(hires_cb, &lv_font_montserrat_12, 0);
+        lv_obj_align(hires_cb, LV_ALIGN_BOTTOM_LEFT, scale_x(8), -scale_y(8));
+        if (pico_hires_setting())
+            lv_obj_add_state(hires_cb, LV_STATE_CHECKED);
+        lv_group_add_obj(group, hires_cb);
+    }
+#endif
+
     lv_obj_add_event_cb(scr, screen_key_event_cb, LV_EVENT_KEY, nullptr);
 
     if (reboot_btn != nullptr)
@@ -398,6 +414,17 @@ extern "C" bool wad_menu_run(bool sd_available)
     // Handoff: drain/re-baseline USB edges so whatever was held in the menu
     // doesn't fire into the first gameplay tics.
     i_input_reset_menu_input();
+
+#ifndef PICODOOM_HDMI
+    // Read before either exit path deletes the screen; applied by the caller
+    // (src/PicoDoom.cpp) once wad_menu_run() returns.
+    if (hires_cb != nullptr) {
+        const int hires = lv_obj_has_state(hires_cb, LV_STATE_CHECKED) ? 1 : 0;
+        if (hires != pico_hires_setting())
+            pico_hires_save(hires);
+        pico_hires = hires;
+    }
+#endif
 
     if (g_selected >= 0 && static_cast<size_t>(g_selected) < g_wads.size()) {
         const char* chosen = g_wads[static_cast<size_t>(g_selected)].c_str();
