@@ -63,11 +63,22 @@ def send_cmd(sock: socket.socket, cmd: str) -> str:
 
 
 def parse_pc(reg_output: str):
-    # `reg pc` prints a line like: "pc (/32): 0x10008a4c"
+    # `reg pc`/`reg lr` print a line like: "pc (/32): 0x10008a4c". Mask off
+    # bit 0 unconditionally: on M-profile ARM, a value used/stored AS DATA
+    # to represent a return address (LR after a BL, or any function pointer
+    # value) always has bit 0 SET to indicate Thumb instruction state --
+    # M-profile is Thumb-only, but the interworking bit is still part of
+    # the *value*, not the actual instruction address. Feeding that raw
+    # (odd) value straight to addr2line/objdump looks up the wrong,
+    # misaligned address and silently fails (found the hard way: an LR
+    # value resolved to "??" and an empty objdump range, both because of
+    # this exact off-by-one-bit mistake). PC read back from a halted
+    # core's own register generally does NOT carry this bit (the debugger
+    # reports the real fetch address), so masking it is a safe no-op there.
     for token in reg_output.split():
         if token.startswith("0x"):
             try:
-                return int(token, 16)
+                return int(token, 16) & ~1
             except ValueError:
                 pass
     return None

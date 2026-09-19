@@ -190,27 +190,40 @@ standalone hot function apart from one that's actually inlined into
 something else and only *looks* like it's the direct cost.
 
 Add `--drill-down-lr` to also capture and resolve `$lr` at each matching
-sample, in an attempt to identify the *caller*. **Caveat, found the hard
-way**: this only works if the matched function is a real leaf (calls
-nothing else) that hasn't repurposed `lr` as an ordinary scratch register
-for its own use -- which a leaf function is entirely free to do, since it
-never needs `lr` to hold a valid return address until its own final
-`bx lr`. If `--drill-down-lr` resolves to `??` (or, worse, to a plausible-
-looking but bogus address -- check it against `arm-none-eabi-objdump -d`
-before trusting it), that's what happened, and finding the real caller
-needs genuine stack-memory unwinding instead (not currently implemented in
-this script).
+sample, in an attempt to identify the *caller*. The script masks bit 0 off
+both `pc` and `lr` before resolving (M-profile ARM stores a return address
+*as data* with bit 0 set, to indicate Thumb state on the eventual `bx`;
+feeding that odd value straight to `addr2line`/`objdump` looks up the
+wrong, misaligned address and silently fails -- found the hard way).
+
+**Caveat, found the hard way (and confirmed, not just suspected)**: this
+only works if the matched function is a real leaf (calls nothing else
+after the point you're sampling) that hasn't repurposed `lr` as an
+ordinary scratch register for its own use -- which a leaf function is
+entirely free to do, since it never needs `lr` to hold a valid return
+address until its own final `bx lr`. Confirmed exactly this happening with
+`W_CheckNumForName()` (see "Known open item" below): `--drill-down-lr`
+resolved every sample to the same fixed address, which turned out to be
+newlib's `_ctype_` table -- a **data** symbol, not a return address at
+all -- because `strupr()` (called once, early in the function, using
+`toupper()`/`_ctype_` internally) left that table's address cached in
+`lr` for the rest of the function's lifetime, since nothing after it needs
+`lr` for anything else. If `--drill-down-lr` resolves to `??`, or to an
+address that turns out to be a data symbol via
+`arm-none-eabi-nm -n <elf> | grep <addr>` (always check before trusting
+it), that's what's happening, and finding the real caller needs genuine
+stack-memory unwinding instead (not currently implemented in this script).
 
 ### Known open item
 
 `W_CheckNumForName()` (an O(numlumps) linear WAD-directory scan,
-`doom/w_wad.c`) showed up at a real, reproducible ~4% of samples during
+`doom/w_wad.c`) shows up at a real, reproducible ~4% of samples during
 confirmed steady, no-level-transition gameplay -- genuinely executing
 inside its own loop (confirmed via `--drill-down`), not a misattribution
 artifact. No caller in the whole codebase calls it (directly or via
 `R_FlatNumForName`/`R_TextureNumForName`) anywhere outside one-time
 level-load/init code, as far as a full-codebase text search found, and
-`--drill-down-lr` couldn't identify the real caller for the reason above.
-Left unresolved as a low-priority item (dwarfed by `R_DrawColumn` and
-`I_FinishUpdate` at ~29%/~25% each) -- picking it back up would mean adding
-real stack unwinding to this script.
+`--drill-down-lr` resolved to newlib's `_ctype_` table rather than a real
+caller -- see the caveat above for why. Left unresolved as a low-priority
+item (dwarfed by `R_DrawColumn` and `I_FinishUpdate` at ~29%/~25% each) --
+picking it back up would mean adding real stack unwinding to this script.
