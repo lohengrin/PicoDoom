@@ -42,15 +42,22 @@ typedef int fixed_t;
 // instruction, so the real cost of calling this as a separate function was
 // almost entirely branch-and-link/register-save overhead around that one
 // instruction. Confirmed hot on real hardware (2026-09 performance work,
-// tools/profile_sample.py's SWD sampling profiler: ~3% of all sampled
-// program-counter snapshots landed inside a standalone FixedMul() call,
-// across the huge number of texture-scale/lighting calculations the
-// renderer makes). `static __inline__`, not plain `inline`: this file
-// group builds as gnu90 (see CMakeLists.txt), where C89/C99/GNU89 inline
-// linkage rules differ in subtle, easy-to-get-wrong ways -- `static`
-// sidesteps all of that by giving every translation unit its own
-// internal-linkage copy, which -O3 then inlines away at each call site.
-static __inline__ fixed_t FixedMul (fixed_t a, fixed_t b)
+// tools/profile_sample.py's SWD sampling profiler: ~3-4% of all sampled
+// program-counter snapshots landed inside FixedMul, across the huge number
+// of texture-scale/lighting calculations the renderer makes). `static
+// __inline__`, not plain `inline`: this file group builds as gnu90 (see
+// CMakeLists.txt), where C89/C99/GNU89 inline linkage rules differ in
+// subtle, easy-to-get-wrong ways -- `static` sidesteps all of that by
+// giving every translation unit its own internal-linkage copy.
+// `__attribute__((always_inline))` on top of that: -O3's inlining is
+// heuristic (size/complexity budget per call site) and this project
+// confirmed via objdump that it DID already fully inline every call site
+// with just `static __inline__` alone (zero `bl FixedMul` anywhere in the
+// binary, one `smull` per call site) -- so this attribute changes nothing
+// today, but makes that a guarantee instead of a heuristic outcome that
+// could silently regress under a different GCC version, -O level, or a
+// future call site large/complex enough to hit the inliner's budget.
+static __inline__ __attribute__((always_inline)) fixed_t FixedMul (fixed_t a, fixed_t b)
 {
     return (fixed_t)(((long long) a * (long long) b) >> FRACBITS);
 }
