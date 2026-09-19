@@ -474,11 +474,11 @@ typedef struct
   byte		pad1;
   // Here lies the rub for all
   //  dynamic resize/change of resolution.
-  byte		top[SCREENWIDTH];
+  byte		top[MAX_SCREENWIDTH];
   byte		pad2;
   byte		pad3;
   // See above.
-  byte		bottom[SCREENWIDTH];
+  byte		bottom[MAX_SCREENWIDTH];
   byte		pad4;
 
 } visplane_t;

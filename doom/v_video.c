@@ -40,8 +40,20 @@ rcsid[] = "$Id: v_video.c,v 1.5 1997/02/03 22:45:13 b1 Exp $";
 #include "v_video.h"
 
 
-// Each screen is [SCREENWIDTH*SCREENHEIGHT]; 
-byte*				screens[5];	
+#ifndef PICODOOM_HDMI
+// Runtime screen geometry for the lcd builds (see the SCREENWIDTH comment in
+// doomdef.h): defaults to the largest mode, overwritten exactly once, before
+// D_DoomMain() runs, by i_video_lcd_set_hires() (src/i_video_*.cpp) once the
+// boot menu has settled on 320x200 vs 480x300. Nothing may read these into a
+// long-lived cached value before that happens -- everything sized from them
+// (screens[], the wipe buffers, the automap's finit_*, ...) is allocated
+// inside D_DoomMain()'s init chain, after the menu.
+int g_screenwidth  = MAX_SCREENWIDTH;
+int g_screenheight = MAX_SCREENHEIGHT;
+#endif
+
+// Each screen is [SCREENWIDTH*SCREENHEIGHT];
+byte*				screens[5];
  
 int				dirtybox[4]; 
 

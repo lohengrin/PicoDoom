@@ -48,7 +48,7 @@ extern  short*		lastopening;
 // docs/PLAN.md): a level area revealing a lot of new wall geometry at
 // once (a secret door opening) is exactly the scenario that pushes
 // lastopening furthest in one frame.
-#define MAXOPENINGS (SCREENWIDTH*64)
+#define MAXOPENINGS (MAX_SCREENWIDTH*64)
 extern short openings[MAXOPENINGS];
 #endif
 
@@ -58,11 +58,11 @@ typedef void (*planefunction_t) (int top, int bottom);
 extern planefunction_t	floorfunc;
 extern planefunction_t	ceilingfunc_t;
 
-extern short		floorclip[SCREENWIDTH];
-extern short		ceilingclip[SCREENWIDTH];
+extern short		floorclip[MAX_SCREENWIDTH];
+extern short		ceilingclip[MAX_SCREENWIDTH];
 
-extern fixed_t		yslope[SCREENHEIGHT];
-extern fixed_t		distscale[SCREENWIDTH];
+extern fixed_t		yslope[MAX_SCREENHEIGHT];
+extern fixed_t		distscale[MAX_SCREENWIDTH];
 
 void R_InitPlanes (void);
 void R_ClearPlanes (void);

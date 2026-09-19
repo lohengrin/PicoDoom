@@ -49,6 +49,7 @@ extern "C" {
 #include <malloc.h>
 #include <span>
 
+#include "hardware/sync.h"
 #include "pico/multicore.h"
 #include "pico/stdlib.h"
 #include "pico/time.h"
@@ -123,12 +124,18 @@ void rebuild_rgb565_lut() {
     }
 }
 
-constexpr int kDstWidth = SCREENWIDTH;   // 480, native (see doom/doomdef.h)
-constexpr int kDstHeight = SCREENHEIGHT; // 300
+// The game's frame size is chosen at boot (320x200 or 480x300, see
+// i_video_lcd_set_hires() below and doom/doomdef.h's SCREENWIDTH comment) --
+// SCREENWIDTH/SCREENHEIGHT are runtime globals here, so everything below that
+// used to be a constexpr derived from them is either a runtime value read
+// per frame, or sized for the LARGEST mode (MAX_SCREENWIDTH/HEIGHT) when it
+// has to be allocated once up front.
+//
 // Unlike Ili9486::kWidth/kHeight, St7796 has no compile-time size constants
-// (config-driven, see st7796.h) -- computed once in I_InitGraphics() after
-// g_display.init(), before anything (including i_video_core1_step()) reads
-// them.
+// (config-driven, see st7796.h) -- the letterbox offset is computed at
+// runtime in i_video_lcd_set_hires() (and once in I_InitGraphics(), for the
+// default mode, so the boot menu/anything before the choice is made is
+// unaffected), before anything (including i_video_core1_step()) reads it.
 int g_offset_x = 0;
 int g_offset_y = 0;
 
@@ -141,9 +148,17 @@ int g_offset_y = 0;
 // command overhead; 100 rows/3 bands cuts that 5x). Carried over unchanged
 // as a starting point -- re-measure on this panel once it's in hand.
 constexpr int kBandRows = 100;
-static_assert(kDstHeight % kBandRows == 0, "kBandRows must divide kDstHeight evenly");
-constexpr int kNumBands = kDstHeight / kBandRows;
-constexpr int kBandPixels = kDstWidth * kBandRows;
+// Both supported frame heights (200 and 300) must split into whole bands, and
+// the blit buffers below are sized for the widest mode.
+static_assert(MAX_SCREENHEIGHT % kBandRows == 0, "kBandRows must divide the tallest frame height evenly");
+static_assert(200 % kBandRows == 0, "kBandRows must divide the 320x200 frame height evenly");
+constexpr int kMaxBandPixels = MAX_SCREENWIDTH * kBandRows;
+// Per-mode band geometry, refreshed by i_video_lcd_set_hires() -- read by
+// core0 (I_FinishUpdate) and core1 (i_video_core1_step), which is why they're
+// plain ints set once before any blit starts rather than derived per call.
+int g_num_bands = MAX_SCREENHEIGHT / kBandRows;
+int g_band_pixels = MAX_SCREENWIDTH * kBandRows;
+int g_dst_width = MAX_SCREENWIDTH;
 
 uint16_t* g_screen_buf[2] = {nullptr, nullptr};
 // true = free for core0 to write screens[0]'s converted pixels into. Flip
@@ -260,7 +275,7 @@ void I_InitGraphics(void) {
     // allocated) minus the total SRAM heap budget is accurate regardless of
     // arena growth state -- same computation report_stats_if_due uses for
     // the "SRAM used/total" stats line.
-    constexpr size_t kBlitBytes = kBandPixels * sizeof(uint16_t);
+    constexpr size_t kBlitBytes = kMaxBandPixels * sizeof(uint16_t);
     bool all_sram = true;
     for (uint16_t*& buf : g_screen_buf) {
         struct mallinfo mi = mallinfo();
@@ -291,8 +306,8 @@ void I_InitGraphics(void) {
     // unlike Ili9486::kWidth/kHeight) -- compute the letterbox offset here,
     // before anything (including i_video_core1_step(), which runs on core1
     // once blits start flowing) reads g_offset_x/g_offset_y.
-    g_offset_x = (g_display.width() - kDstWidth) / 2;
-    g_offset_y = (g_display.height() - kDstHeight) / 2;
+    g_offset_x = (g_display.width() - SCREENWIDTH) / 2;
+    g_offset_y = (g_display.height() - SCREENHEIGHT) / 2;
     // Black out the whole panel once, independent of any palette/game state
     // -- confirms the panel is alive and gives a clean border around the
     // centered scaled game viewport that I_FinishUpdate never touches. Runs
@@ -306,6 +321,38 @@ void I_InitGraphics(void) {
     // static config's request.
     printf("PicoDoom: SPI pixel clock requested=%u Hz  actual=%u Hz  gamma %.2f\n",
            (unsigned)g_display.pixel_clock_hz(), (unsigned)g_display.pixel_clock_actual_hz(), g_gamma);
+}
+
+// Applies the boot menu's "High res" choice: 480x300 (hires) or 320x200.
+// Called exactly once, by src/PicoDoom.cpp after wad_menu_run() returns and
+// before D_DoomMain() -- see doom/doomdef.h's SCREENWIDTH comment for what
+// that ordering has to guarantee (nothing sized from SCREENWIDTH/HEIGHT may
+// have been allocated or cached yet). Runs on core0 while core1 is idle
+// (nothing has been pushed to the blit FIFO yet), so it's safe to touch the
+// panel directly here, same as I_InitGraphics()'s one-time fill_solid().
+void i_video_lcd_set_hires(int hires) {
+    g_screenwidth = hires ? 480 : 320;
+    g_screenheight = hires ? 300 : 200;
+
+    g_dst_width = SCREENWIDTH;
+    g_num_bands = SCREENHEIGHT / kBandRows;
+    g_band_pixels = SCREENWIDTH * kBandRows;
+    g_offset_x = (g_display.width() - SCREENWIDTH) / 2;
+    g_offset_y = (g_display.height() - SCREENHEIGHT) / 2;
+
+    // The boot menu painted the whole panel; a 320x200 game window is
+    // smaller than that, and I_FinishUpdate() only ever writes inside the
+    // window, so anything the menu left in the border (skip/cancel exits tear
+    // the menu down without a full-screen "Loading..." repaint) would stay
+    // on screen for the whole game. Clear it once, now.
+    g_panel.fill_solid(0);
+
+    // core1 reads g_offset_*/g_dst_width/g_band_pixels the moment the first
+    // band reaches it via the FIFO; make sure these stores are visible first.
+    __dmb();
+
+    printf("PicoDoom: game frame %dx%d (%s), panel offset %d,%d\n",
+           SCREENWIDTH, SCREENHEIGHT, hires ? "high res" : "low res", g_offset_x, g_offset_y);
 }
 
 void I_ShutdownGraphics(void) {}
@@ -336,7 +383,12 @@ void I_FinishUpdate(void) {
     // wait-for-slot backpressure and the SPI feed interleave at band
     // granularity instead of once per frame.
     const byte* src = screens[0];
-    for (int band = 0; band < kNumBands; ++band) {
+    // Band geometry for the current frame mode (set once, before any blit,
+    // by i_video_lcd_set_hires()); read into locals so the loop below keeps
+    // the same shape/codegen as when these were compile-time constants.
+    const int num_bands = g_num_bands;
+    const int band_pixels = g_band_pixels;
+    for (int band = 0; band < num_bands; ++band) {
         // Backpressure: only blocks if core1 hasn't finished DMA'ing this
         // same slot's previous band yet, i.e. if core1's SPI feed is the
         // bottleneck rather than core0's game logic/render.
@@ -346,9 +398,9 @@ void I_FinishUpdate(void) {
         uint64_t convert_start_us = time_us_64();
         g_wait_us_in_window += convert_start_us - wait_start_us;
 
-        const byte* band_src = src + static_cast<size_t>(band) * kBandPixels;
+        const byte* band_src = src + static_cast<size_t>(band) * band_pixels;
         uint16_t* dst = g_screen_buf[next_idx];
-        for (int i = 0; i < kBandPixels; ++i)
+        for (int i = 0; i < band_pixels; ++i)
             dst[i] = g_rgb565_wire_lut[band_src[i]];
         uint64_t convert_done_us = time_us_64();
         g_convert_us_in_window += convert_done_us - convert_start_us;
@@ -456,9 +508,9 @@ void i_video_core1_step() {
         int band = static_cast<int>(word >> 1);
         int y0 = g_offset_y + band * kBandRows;
         g_panel.set_window(g_offset_x, y0,
-                            g_offset_x + kDstWidth - 1, y0 + kBandRows - 1);
+                            g_offset_x + g_dst_width - 1, y0 + kBandRows - 1);
         g_dma_start_us = time_us_64();
-        g_panel.start_pixels_dma(std::span<const uint16_t>(g_screen_buf[g_blit_idx], kBandPixels));
+        g_panel.start_pixels_dma(std::span<const uint16_t>(g_screen_buf[g_blit_idx], g_band_pixels));
         g_blit_state = BlitState::Transferring;
         return;
     }

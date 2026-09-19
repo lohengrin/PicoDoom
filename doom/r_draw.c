@@ -137,6 +137,12 @@ void __not_in_flash_func(R_DrawColumn) (void)
 void R_DrawColumn (void)
 #endif
 {
+    // Row stride cached in a local: SCREENWIDTH is a runtime global on the lcd
+    // builds, and GCC must assume the byte store through dest below may alias
+    // it (-fno-strict-aliasing), so left as-is it would be re-loaded from
+    // memory on every pixel of this hot loop -- same reason dc_source/
+    // dc_colormap are cached above. Free on hdmi (constant folds).
+    const int stride = SCREENWIDTH;
     int			count;
     byte*		dest;
     fixed_t		frac;
@@ -220,7 +226,7 @@ void R_DrawColumn (void)
 	do
 	{
 	    *dest = merged[(frac>>FRACBITS)&127];
-	    dest += SCREENWIDTH;
+	    dest += stride;
 	    frac += fracstep;
 	} while (count--);
     }
@@ -231,7 +237,7 @@ void R_DrawColumn (void)
 	    // Re-map color indices from wall texture column
 	    //  using a lighting/special effects LUT.
 	    *dest = colormap[source[(frac>>FRACBITS)&127]];
-	    dest += SCREENWIDTH;
+	    dest += stride;
 	    frac += fracstep;
 	} while (count--);
     }
@@ -242,7 +248,7 @@ void R_DrawColumn (void)
 	//  using a lighting/special effects LUT.
 	*dest = dc_colormap[dc_source[(frac>>FRACBITS)&127]];
 
-	dest += SCREENWIDTH;
+	dest += stride;
 	frac += fracstep;
 
     } while (count--);
@@ -316,6 +322,12 @@ void __not_in_flash_func(R_DrawColumnLow) (void)
 void R_DrawColumnLow (void)
 #endif
 {
+    // Row stride cached in a local: SCREENWIDTH is a runtime global on the lcd
+    // builds, and GCC must assume the byte store through dest below may alias
+    // it (-fno-strict-aliasing), so left as-is it would be re-loaded from
+    // memory on every pixel of this hot loop -- same reason dc_source/
+    // dc_colormap are cached above. Free on hdmi (constant folds).
+    const int stride = SCREENWIDTH;
     int			count;
     byte*		dest;
     byte*		dest2;
@@ -372,8 +384,8 @@ void R_DrawColumnLow (void)
 	{
 	    // Hack. Does not work corretly.
 	    *dest2 = *dest = merged[(frac>>FRACBITS)&127];
-	    dest += SCREENWIDTH;
-	    dest2 += SCREENWIDTH;
+	    dest += stride;
+	    dest2 += stride;
 	    frac += fracstep;
 
 	} while (count--);
@@ -384,8 +396,8 @@ void R_DrawColumnLow (void)
 	{
 	    // Hack. Does not work corretly.
 	    *dest2 = *dest = colormap[source[(frac>>FRACBITS)&127]];
-	    dest += SCREENWIDTH;
-	    dest2 += SCREENWIDTH;
+	    dest += stride;
+	    dest2 += stride;
 	    frac += fracstep;
 
 	} while (count--);
@@ -395,8 +407,8 @@ void R_DrawColumnLow (void)
     {
 	// Hack. Does not work corretly.
 	*dest2 = *dest = dc_colormap[dc_source[(frac>>FRACBITS)&127]];
-	dest += SCREENWIDTH;
-	dest2 += SCREENWIDTH;
+	dest += stride;
+	dest2 += stride;
 	frac += fracstep;
 
     } while (count--);
@@ -408,19 +420,23 @@ void R_DrawColumnLow (void)
 // Spectre/Invisibility.
 //
 #define FUZZTABLE		50 
-#define FUZZOFF	(SCREENWIDTH)
-
-
-int	fuzzoffset[FUZZTABLE] =
+// Row-offset direction of each fuzz step (+1 = pixel below, -1 = above).
+// The actual per-step offsets are +/-SCREENWIDTH, which is a runtime value on
+// the lcd builds (320x200 vs 480x300 chosen at boot), so they can't sit in a
+// static initializer -- R_InitBuffer() multiplies these by the current
+// SCREENWIDTH into fuzzoffset[] every time the view is (re)initialised.
+static const signed char fuzzdir[FUZZTABLE] =
 {
-    FUZZOFF,-FUZZOFF,FUZZOFF,-FUZZOFF,FUZZOFF,FUZZOFF,-FUZZOFF,
-    FUZZOFF,FUZZOFF,-FUZZOFF,FUZZOFF,FUZZOFF,FUZZOFF,-FUZZOFF,
-    FUZZOFF,FUZZOFF,FUZZOFF,-FUZZOFF,-FUZZOFF,-FUZZOFF,-FUZZOFF,
-    FUZZOFF,-FUZZOFF,-FUZZOFF,FUZZOFF,FUZZOFF,FUZZOFF,FUZZOFF,-FUZZOFF,
-    FUZZOFF,-FUZZOFF,FUZZOFF,FUZZOFF,-FUZZOFF,-FUZZOFF,FUZZOFF,
-    FUZZOFF,-FUZZOFF,-FUZZOFF,-FUZZOFF,-FUZZOFF,FUZZOFF,FUZZOFF,
-    FUZZOFF,FUZZOFF,-FUZZOFF,FUZZOFF,FUZZOFF,-FUZZOFF,FUZZOFF 
-}; 
+    1,-1,1,-1,1,1,-1,
+    1,1,-1,1,1,1,-1,
+    1,1,1,-1,-1,-1,-1,
+    1,-1,-1,1,1,1,1,-1,
+    1,-1,1,1,-1,-1,1,
+    1,-1,-1,-1,-1,1,1,
+    1,1,-1,1,1,-1,1
+};
+
+int	fuzzoffset[FUZZTABLE];
 
 int	fuzzpos = 0; 
 
@@ -435,6 +451,12 @@ int	fuzzpos = 0;
 //
 void R_DrawFuzzColumn (void) 
 { 
+    // Row stride cached in a local: SCREENWIDTH is a runtime global on the lcd
+    // builds, and GCC must assume the byte store through dest below may alias
+    // it (-fno-strict-aliasing), so left as-is it would be re-loaded from
+    // memory on every pixel of this hot loop -- same reason dc_source/
+    // dc_colormap are cached above. Free on hdmi (constant folds).
+    const int stride = SCREENWIDTH;
     int			count; 
     byte*		dest; 
     fixed_t		frac;
@@ -512,7 +534,7 @@ void R_DrawFuzzColumn (void)
 	if (++fuzzpos == FUZZTABLE) 
 	    fuzzpos = 0;
 	
-	dest += SCREENWIDTH;
+	dest += stride;
 
 	frac += fracstep; 
     } while (count--); 
@@ -539,6 +561,12 @@ void __not_in_flash_func(R_DrawTranslatedColumn) (void)
 void R_DrawTranslatedColumn (void)
 #endif
 {
+    // Row stride cached in a local: SCREENWIDTH is a runtime global on the lcd
+    // builds, and GCC must assume the byte store through dest below may alias
+    // it (-fno-strict-aliasing), so left as-is it would be re-loaded from
+    // memory on every pixel of this hot loop -- same reason dc_source/
+    // dc_colormap are cached above. Free on hdmi (constant folds).
+    const int stride = SCREENWIDTH;
     int			count;
     byte*		dest;
     fixed_t		frac;
@@ -606,7 +634,7 @@ void R_DrawTranslatedColumn (void)
 #else
 	*dest = dc_colormap[dc_translation[dc_source[frac>>FRACBITS]]];
 #endif
-	dest += SCREENWIDTH;
+	dest += stride;
 
 	frac += fracstep;
     } while (count--);
@@ -918,6 +946,9 @@ R_InitBuffer
 	    I_Error ("R_InitBuffer: ylookup/columnofs pool alloc failed");
     }
 #endif
+
+    for (i=0 ; i<FUZZTABLE ; i++)
+	fuzzoffset[i] = fuzzdir[i] * SCREENWIDTH;
 
     // Handle resize,
     //  e.g. smaller view windows

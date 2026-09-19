@@ -116,7 +116,7 @@ extern int*		viewangletox;
 #else
 extern int		viewangletox[FINEANGLES/2];
 #endif
-extern angle_t		xtoviewangle[SCREENWIDTH+1];
+extern angle_t		xtoviewangle[MAX_SCREENWIDTH+1];
 //extern fixed_t		finetangent[FINEANGLES/2];
 
 extern fixed_t		rw_distance;

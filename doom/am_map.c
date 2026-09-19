@@ -219,11 +219,10 @@ static int 	grid = 0;
 static int 	leveljuststarted = 1; 	// kluge until AM_LevelInit() is called
 
 boolean    	automapactive = false;
-static int 	finit_width = SCREENWIDTH;
-// -32 is the classic status-bar-height-in-physical-pixels assumption;
-// UI_SCALE it so the automap correctly reserves the actual (scaled)
-// status bar height at the bottom of the screen (see doom/st_stuff.h).
-static int 	finit_height = SCREENHEIGHT - UI_SCALE(32);
+// Filled in AM_LevelInit() -- SCREENWIDTH/SCREENHEIGHT are runtime values on
+// the lcd builds (see doom/doomdef.h), so these can't be static initializers.
+static int 	finit_width;
+static int 	finit_height;
 
 // location of window on screen
 static int 	f_x;
@@ -542,6 +541,12 @@ void AM_LevelInit(void)
     leveljuststarted = 0;
 
     f_x = f_y = 0;
+    finit_width = SCREENWIDTH;
+    // -32 is the classic status-bar-height-in-physical-pixels assumption;
+    // UI_SCALE it so the automap correctly reserves the actual (scaled)
+    // status bar height at the bottom of the screen (see doom/st_stuff.h).
+    finit_height = SCREENHEIGHT - UI_SCALE(32);
+
     f_w = finit_width;
     f_h = finit_height;
 

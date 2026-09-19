@@ -113,7 +113,7 @@ int			viewangletox[FINEANGLES/2];
 // The xtoviewangleangle[] table maps a screen pixel
 // to the lowest viewangle that maps back to x ranges
 // from clipangle to -clipangle.
-angle_t			xtoviewangle[SCREENWIDTH+1];
+angle_t			xtoviewangle[MAX_SCREENWIDTH+1];
 
 
 // UNUSED.
@@ -762,7 +762,14 @@ void R_ExecuteSetViewSize (void)
     // resulting gap above the now-lower/bigger status bar) instead of
     // matching the rest of the UI_SCALE'd UI.
     pspritescale = UI_SCALE(FRACUNIT)*viewwidth/SCREENWIDTH;
-    pspriteiscale = FRACUNIT*SCREENWIDTH*UI_SCALE_DEN/(viewwidth*UI_SCALE_NUM);
+    // The inverse of pspritescale: FRACUNIT*SCREENWIDTH*(1/UI_SCALE ratio)/
+    // viewwidth, where the UI_SCALE ratio is SCREENWIDTH/BASE_WIDTH -- so
+    // SCREENWIDTH cancels and this is just FRACUNIT*BASE_WIDTH/viewwidth,
+    // valid for every resolution (bit-identical to the old
+    // FRACUNIT*SCREENWIDTH*UI_SCALE_DEN/(viewwidth*UI_SCALE_NUM) at both
+    // 480x300 and 320x200: e.g. 65536*480*2/(viewwidth*3) == 65536*320/viewwidth
+    // exactly, since the numerator is exactly 3x).
+    pspriteiscale = FRACUNIT*BASE_WIDTH/viewwidth;
     
     // thing clipping
     for (i=0 ; i<viewwidth ; i++)

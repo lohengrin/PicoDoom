@@ -74,7 +74,7 @@ visplane_t*		ceilingplane;
 // Under PICO, both now come from r_plane.h instead -- see its #ifdef PICO
 // comment (r_segs.c needs MAXOPENINGS too, to bounds-check before writing
 // through lastopening, not just here, after the fact).
-#define MAXOPENINGS	SCREENWIDTH*64
+#define MAXOPENINGS	(MAX_SCREENWIDTH*64)
 #endif
 short			openings[MAXOPENINGS];
 short*			lastopening;
@@ -85,15 +85,15 @@ short*			lastopening;
 //  floorclip starts out SCREENHEIGHT
 //  ceilingclip starts out -1
 //
-short			floorclip[SCREENWIDTH];
-short			ceilingclip[SCREENWIDTH];
+short			floorclip[MAX_SCREENWIDTH];
+short			ceilingclip[MAX_SCREENWIDTH];
 
 //
 // spanstart holds the start of a plane span
 // initialized to 0 at start
 //
-int			spanstart[SCREENHEIGHT];
-int			spanstop[SCREENHEIGHT];
+int			spanstart[MAX_SCREENHEIGHT];
+int			spanstop[MAX_SCREENHEIGHT];
 
 //
 // texture mapping
@@ -101,15 +101,15 @@ int			spanstop[SCREENHEIGHT];
 lighttable_t**		planezlight;
 fixed_t			planeheight;
 
-fixed_t			yslope[SCREENHEIGHT];
-fixed_t			distscale[SCREENWIDTH];
+fixed_t			yslope[MAX_SCREENHEIGHT];
+fixed_t			distscale[MAX_SCREENWIDTH];
 fixed_t			basexscale;
 fixed_t			baseyscale;
 
-fixed_t			cachedheight[SCREENHEIGHT];
-fixed_t			cacheddistance[SCREENHEIGHT];
-fixed_t			cachedxstep[SCREENHEIGHT];
-fixed_t			cachedystep[SCREENHEIGHT];
+fixed_t			cachedheight[MAX_SCREENHEIGHT];
+fixed_t			cacheddistance[MAX_SCREENHEIGHT];
+fixed_t			cachedxstep[MAX_SCREENHEIGHT];
+fixed_t			cachedystep[MAX_SCREENHEIGHT];
 
 
 
