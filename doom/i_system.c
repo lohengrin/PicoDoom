@@ -57,6 +57,33 @@ int	mb_used = 6;
 // pico_toolset::psram_init() runs in main() (src/PicoDoom.cpp) before
 // D_DoomMain().
 extern void *psram_malloc (size_t);
+
+#include <malloc.h>
+extern char __StackLimit;
+extern char __bss_end__;
+
+// Small, always-fully-resident, extremely hot pieces of otherwise-PSRAM-
+// backed zone data (see I_ZoneBase() below) can be worth pinning in SRAM
+// instead -- see doom/r_data.c's R_InitColormaps() for the motivating case
+// (2026-09 performance work). A plain malloc() is the wrong way to attempt
+// this: this SDK's pico_malloc wrapper has PICO_MALLOC_PANIC=1 by default,
+// so a malloc() call that's going to fail panics immediately instead of
+// returning NULL -- same reasoning, and same mallinfo()-based headroom
+// check (uordblks vs the heap arena size, NOT fordblks -- see
+// src/i_video_st7796.cpp's identically-shaped comment for why fordblks is
+// wrong here), as the video backends already use for their blit buffers.
+// Returns NULL (never panics) if there isn't enough estimated headroom for
+// `size`; a real SRAM allocation otherwise.
+void *I_TrySramMalloc (size_t size)
+{
+    struct mallinfo mi = mallinfo();
+    size_t sram_total = (size_t)(&__StackLimit - &__bss_end__);
+    size_t sram_used = (size_t)mi.uordblks;
+    size_t sram_free_estimate = sram_total > sram_used ? sram_total - sram_used : 0;
+    if (sram_free_estimate < size)
+	return NULL;
+    return malloc (size);
+}
 #endif
 
 

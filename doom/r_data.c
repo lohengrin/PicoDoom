@@ -643,14 +643,43 @@ void R_InitSpriteLumps (void)
 void R_InitColormaps (void)
 {
     int	lump, length;
-    
-    // Load in the light tables, 
+#ifdef PICO
+    extern void *I_TrySramMalloc (size_t);
+    byte* sram_base;
+#endif
+
+    // Load in the light tables,
     //  256 byte align tables.
-    lump = W_GetNumForName("COLORMAP"); 
-    length = W_LumpLength (lump) + 255; 
-    colormaps = Z_Malloc (length, PU_STATIC, 0); 
-    colormaps = (byte *)( ((intptr_t)colormaps + 255)&~0xff); 
-    W_ReadLump (lump,colormaps); 
+    lump = W_GetNumForName("COLORMAP");
+    length = W_LumpLength (lump);
+
+#ifdef PICO
+    // Every single pixel this renderer draws (walls, floors/ceilings, and
+    // sprites alike) samples this table via colormap[byte] -- by far the
+    // hottest, most frequently re-read data in the whole engine (confirmed
+    // via the frame-phase stats breakdown, 2026-09 performance work, that
+    // pinned R_DrawColumn's colormap[source[i]] lookup as the renderer's
+    // single biggest per-frame cost at native 480x300). The zone heap this
+    // would otherwise come from is entirely PSRAM-backed (I_ZoneBase(),
+    // this file's sibling doom/i_system.c) -- fine for the vast majority of
+    // WAD-cached data (large, and only a fraction of it live at once) but
+    // wrong for a small (~8.5KB), always-fully-resident, never-reallocated
+    // table this hot. Try SRAM first; fall back to the normal PSRAM zone
+    // allocation below if there isn't room (slower, not broken) -- see
+    // I_TrySramMalloc's own comment for why this checks headroom rather
+    // than letting a failing malloc() panic.
+    sram_base = (byte *) I_TrySramMalloc (length + 255);
+    if (sram_base)
+    {
+	colormaps = (byte *)( ((intptr_t)sram_base + 255)&~0xff);
+	W_ReadLump (lump, colormaps);
+	return;
+    }
+#endif
+
+    colormaps = Z_Malloc (length + 255, PU_STATIC, 0);
+    colormaps = (byte *)( ((intptr_t)colormaps + 255)&~0xff);
+    W_ReadLump (lump,colormaps);
 }
 
 
