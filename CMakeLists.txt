@@ -134,6 +134,9 @@ FetchContent_Declare(
     lvgl
     GIT_REPOSITORY https://github.com/lvgl/lvgl.git
     GIT_TAG v9.2.2
+    # Keep LVGL out of `install` (its own rules target /usr/local); it still
+    # builds as a dependency of PicoDoom.
+    EXCLUDE_FROM_ALL
 )
 FetchContent_MakeAvailable(lvgl)
 
@@ -394,3 +397,19 @@ pico_enable_stdio_uart(PicoDoom 0)
 pico_add_extra_outputs(PicoDoom)
 
 
+
+# `cmake --build <dir> --target install` copies the flashable images to
+# <source>/install/, renamed after the options this build dir was configured
+# with (e.g. PicoDoom-lcd-st7796-release.uf2) so every variant can sit side by
+# side. Absolute destination on purpose: CMAKE_INSTALL_PREFIX is /usr/local by
+# default and these are firmware images, not system files.
+string(TOLOWER "${CMAKE_BUILD_TYPE}" PICODOOM_INSTALL_BUILD_TYPE)
+if(NOT PICODOOM_INSTALL_BUILD_TYPE)
+    set(PICODOOM_INSTALL_BUILD_TYPE "default")
+endif()
+set(PICODOOM_INSTALL_NAME "PicoDoom-${PICODOOM_VIDEO_OUTPUT}-${PICODOOM_INSTALL_BUILD_TYPE}")
+set(PICODOOM_INSTALL_DIR "${CMAKE_SOURCE_DIR}/install" CACHE PATH "Where the install target puts the uf2/bin images")
+install(FILES "$<TARGET_FILE_DIR:PicoDoom>/PicoDoom.uf2"
+        DESTINATION "${PICODOOM_INSTALL_DIR}" RENAME "${PICODOOM_INSTALL_NAME}.uf2")
+install(FILES "$<TARGET_FILE_DIR:PicoDoom>/PicoDoom.bin"
+        DESTINATION "${PICODOOM_INSTALL_DIR}" RENAME "${PICODOOM_INSTALL_NAME}.bin")
