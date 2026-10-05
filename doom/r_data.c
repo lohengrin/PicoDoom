@@ -29,6 +29,13 @@ rcsid[] = "$Id: r_data.c,v 1.4 1997/02/03 16:47:55 b1 Exp $";
 
 #include <stdint.h>
 
+#ifdef PICO
+#include "pico.h"
+#define PICO_RAMFUNC(name) __not_in_flash_func(name)
+#else
+#define PICO_RAMFUNC(name) name
+#endif
+
 #include "i_system.h"
 #include "z_zone.h"
 
@@ -390,7 +397,7 @@ void R_GenerateLookup (int texnum)
 // R_GetColumn
 //
 byte*
-R_GetColumn
+PICO_RAMFUNC(R_GetColumn)
 ( int		tex,
   int		col )
 {

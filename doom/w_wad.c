@@ -27,6 +27,12 @@ rcsid[] = "$Id: w_wad.c,v 1.5 1997/02/03 16:47:57 b1 Exp $";
 
 
 #if defined(NORMALUNIX) || defined(PICO)
+#ifdef PICO
+#include "pico.h"
+#define PICO_RAMFUNC(name) __not_in_flash_func(name)
+#else
+#define PICO_RAMFUNC(name) name
+#endif
 #include <ctype.h>
 #include <sys/types.h>
 #include <string.h>
@@ -561,7 +567,7 @@ W_ReadLump
 // W_CacheLumpNum
 //
 void*
-W_CacheLumpNum
+PICO_RAMFUNC(W_CacheLumpNum)
 ( int		lump,
   int		tag )
 {

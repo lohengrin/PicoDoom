@@ -24,6 +24,12 @@
 static const char
 rcsid[] = "$Id: z_zone.c,v 1.4 1997/02/03 16:47:58 b1 Exp $";
 
+#ifdef PICO
+#include "pico.h"
+#define PICO_RAMFUNC(name) __not_in_flash_func(name)
+#else
+#define PICO_RAMFUNC(name) name
+#endif
 #include "z_zone.h"
 #include "i_system.h"
 #include "doomdef.h"
@@ -426,7 +432,7 @@ void Z_CheckHeap (void)
 // Z_ChangeTag
 //
 void
-Z_ChangeTag2
+PICO_RAMFUNC(Z_ChangeTag2)
 ( void*		ptr,
   int		tag )
 {

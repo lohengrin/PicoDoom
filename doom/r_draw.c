@@ -76,16 +76,12 @@ int		scaledviewwidth;
 int		viewheight;
 int		viewwindowx;
 int		viewwindowy;
-// Pools are in PSRAM on PICO: each entry is read once per column/span
-// (dest = ylookup[dc_yl] + columnofs[dc_x], computed once then walked with
-// dest += SCREENWIDTH in the per-pixel loop -- not re-indexed per pixel),
-// so PSRAM latency only applies at column/span granularity. Frees SRAM the
-// native-resolution renderer tables (see doom/doomdef.h) needed. See
-// R_InitBuffer for the one-time alloc.
+// Static SRAM tables on PICO, sized for the largest mode (~3KB total). They
+// used to be PSRAM pools, but every column/span reads one entry of each --
+// ~1000+ random PSRAM reads per frame at 480x300 -- and 3KB is cheap.
 #ifdef PICO
-extern void *psram_malloc (size_t);
-byte**		ylookup;
-int*		columnofs;
+byte*		ylookup[MAX_SCREENHEIGHT];
+int		columnofs[MAX_SCREENWIDTH];
 #else
 byte*		ylookup[MAXHEIGHT];
 int		columnofs[MAXWIDTH];
@@ -936,16 +932,6 @@ R_InitBuffer
   int		height )
 {
     int		i;
-
-#ifdef PICO
-    if (!ylookup)
-    {
-	ylookup = (byte **) psram_malloc (MAXHEIGHT * sizeof (*ylookup));
-	columnofs = (int *) psram_malloc (MAXWIDTH * sizeof (*columnofs));
-	if (!ylookup || !columnofs)
-	    I_Error ("R_InitBuffer: ylookup/columnofs pool alloc failed");
-    }
-#endif
 
     for (i=0 ; i<FUZZTABLE ; i++)
 	fuzzoffset[i] = fuzzdir[i] * SCREENWIDTH;

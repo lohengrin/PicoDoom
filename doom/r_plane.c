@@ -40,6 +40,13 @@ rcsid[] = "$Id: r_plane.c,v 1.4 1997/02/03 16:47:55 b1 Exp $";
 #include "r_sky.h"
 
 #ifdef PICO
+#include "pico.h"
+#define PICO_RAMFUNC(name) __not_in_flash_func(name)
+#else
+#define PICO_RAMFUNC(name) name
+#endif
+
+#ifdef PICO
 extern void *psram_malloc (size_t);
 #endif
 
@@ -154,7 +161,7 @@ void R_InitPlanes (void)
 // BASIC PRIMITIVE
 //
 void
-R_MapPlane
+PICO_RAMFUNC(R_MapPlane)
 ( int		y,
   int		x1,
   int		x2 )
@@ -364,7 +371,7 @@ R_CheckPlane
 // R_MakeSpans
 //
 void
-R_MakeSpans
+PICO_RAMFUNC(R_MakeSpans)
 ( int		x,
   int		t1,
   int		b1,
@@ -400,7 +407,7 @@ R_MakeSpans
 // R_DrawPlanes
 // At the end of each frame.
 //
-void R_DrawPlanes (void)
+void PICO_RAMFUNC(R_DrawPlanes) (void)
 {
     visplane_t*		pl;
     int			light;

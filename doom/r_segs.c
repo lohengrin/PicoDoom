@@ -39,6 +39,13 @@ rcsid[] = "$Id: r_segs.c,v 1.3 1997/01/29 20:10:19 b1 Exp $";
 #include "r_local.h"
 #include "r_sky.h"
 
+#ifdef PICO
+#include "pico.h"
+#define PICO_RAMFUNC(name) __not_in_flash_func(name)
+#else
+#define PICO_RAMFUNC(name) name
+#endif
+
 
 // OPTIMIZE: closed two sided lines as single sided
 
@@ -203,7 +210,7 @@ R_RenderMaskedSegRange
 #define HEIGHTBITS		12
 #define HEIGHTUNIT		(1<<HEIGHTBITS)
 
-void R_RenderSegLoop (void)
+void PICO_RAMFUNC(R_RenderSegLoop) (void)
 {
     angle_t		angle;
     unsigned		index;

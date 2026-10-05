@@ -400,8 +400,18 @@ void I_FinishUpdate(void) {
 
         const byte* band_src = src + static_cast<size_t>(band) * band_pixels;
         uint16_t* dst = g_screen_buf[next_idx];
-        for (int i = 0; i < band_pixels; ++i)
-            dst[i] = g_rgb565_wire_lut[band_src[i]];
+        // 4 pixels per source word, 2 per destination word: ~2.5x fewer
+        // instructions than the byte loop, and a quarter of the PSRAM load
+        // issues (screens[0] is PSRAM-backed). band_pixels (width*100) is a multiple of
+        // 4; both buffers are 4-byte aligned.
+        const uint32_t* src32 = reinterpret_cast<const uint32_t*>(band_src);
+        uint32_t* dst32 = reinterpret_cast<uint32_t*>(dst);
+        const uint16_t* lut = g_rgb565_wire_lut;
+        for (int i = 0, n = band_pixels >> 2; i < n; ++i) {
+            const uint32_t w = src32[i];
+            dst32[2 * i]     = lut[w & 0xFF] | (static_cast<uint32_t>(lut[(w >> 8) & 0xFF]) << 16);
+            dst32[2 * i + 1] = lut[(w >> 16) & 0xFF] | (static_cast<uint32_t>(lut[w >> 24]) << 16);
+        }
         uint64_t convert_done_us = time_us_64();
         g_convert_us_in_window += convert_done_us - convert_start_us;
 
