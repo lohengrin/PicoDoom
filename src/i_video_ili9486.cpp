@@ -154,7 +154,9 @@ byte g_palette_cache[256 * 3];
 // LUT I_FinishUpdate() indexes per pixel. Rebuilt wholesale on every
 // I_SetPalette() and every serial 'gamma' change -- 256 entries, one-time
 // cost, not per frame.
+void invalidate_band_hashes();
 void rebuild_rgb565_lut() {
+    invalidate_band_hashes();
     for (int i = 0; i < 256; ++i) {
         byte r = gammatable[usegamma][g_palette_cache[i * 3 + 0]];
         byte g = gammatable[usegamma][g_palette_cache[i * 3 + 1]];
@@ -254,6 +256,30 @@ volatile bool g_blit_buf_free[kNumSlots] = {true, true, true, true, true};
 // (relative to the stats window) spent in the
 // start_pixels_dma()/pixels_busy()-poll/finish_pixels_dma() sequence
 // feeding the whole converted frame to the panel.
+// Unchanged-band skipping (2026-10): the panel keeps its GRAM between frames, so
+// a band whose screens[0] pixels hash the same as the last one actually sent
+// needs neither converting nor DMA. Idle scenes and the status bar (which
+// rarely changes) skip most of the SPI drain. Core0-only. Anything that
+// changes how the same indices map to colors (palette/gamma) or repaints the
+// panel behind our back (resolution change) must call invalidate_band_hashes().
+constexpr int kMaxBands = MAX_SCREENHEIGHT / kBandRows;
+uint32_t g_band_hash[kMaxBands] = {};
+bool g_band_hash_valid[kMaxBands] = {};
+uint32_t g_bands_total_in_window = 0;
+uint32_t g_bands_skipped_in_window = 0;
+
+void invalidate_band_hashes() {
+    for (bool& v : g_band_hash_valid)
+        v = false;
+}
+
+inline uint32_t hash_band(const uint32_t* p, int words) {
+    uint32_t h = 2166136261u;
+    for (int i = 0; i < words; ++i)
+        h = (h ^ p[i]) * 16777619u;
+    return h;
+}
+
 uint64_t g_last_frame_start_us = 0;
 uint64_t g_stats_window_start_us = 0;
 uint32_t g_frames_in_window = 0;
@@ -303,12 +329,15 @@ void report_stats_if_due(uint64_t now_us) {
     printf("PicoDoom: SRAM %u/%uKB  PSRAM %u/%uKB  FPS %.1f  "
            "core0-wait %.0f%%  core0-convert %.0f%%  core1-dma %.0f%%  "
            "tic %.0f%%  render3d %.0f%% (bsp+walls %.0f%%  planes %.0f%%  sprites %.0f%%)  draw2d %.0f%%  "
-           "wad-cache-miss %u/10s\n",
+           "bands-skipped %.0f%%  wad-cache-miss %u/10s\n",
            static_cast<unsigned>(sram_used / 1024), static_cast<unsigned>(sram_total / 1024),
            static_cast<unsigned>(psram_used / 1024), static_cast<unsigned>(psram_total / 1024),
            fps, wait_pct, convert_pct, dma_pct, tic_pct, render3d_pct,
            bsp_walls_pct, planes_pct, sprites_pct, draw2d_pct,
+           g_bands_total_in_window ? 100.0f * static_cast<float>(g_bands_skipped_in_window) / static_cast<float>(g_bands_total_in_window) : 0.0f,
            static_cast<unsigned>(wad_cache_misses));
+    g_bands_total_in_window = 0;
+    g_bands_skipped_in_window = 0;
 
     g_stats_window_start_us = now_us;
     g_frames_in_window = 0;
@@ -425,6 +454,7 @@ void i_video_lcd_set_hires(int hires) {
     // the menu down without a full-screen "Loading..." repaint) would stay
     // on screen for the whole game. Clear it once, now.
     g_panel.fill_solid(0);
+    invalidate_band_hashes();
 
     // core1 reads g_offset_*/g_dst_width/g_band_pixels the moment the first
     // band reaches it via the FIFO; make sure these stores are visible first.
@@ -468,6 +498,15 @@ void I_FinishUpdate(void) {
     const int num_bands = g_num_bands;
     const int band_pixels = g_band_pixels;
     for (int band = 0; band < num_bands; ++band) {
+        ++g_bands_total_in_window;
+        const uint32_t band_hash = hash_band(
+            reinterpret_cast<const uint32_t*>(src + static_cast<size_t>(band) * band_pixels), band_pixels >> 2);
+        if (g_band_hash_valid[band] && g_band_hash[band] == band_hash) {
+            ++g_bands_skipped_in_window;
+            continue;
+        }
+        g_band_hash[band] = band_hash;
+        g_band_hash_valid[band] = true;
         // Backpressure: only blocks if core1 hasn't finished DMA'ing this
         // same slot's previous band yet, i.e. if core1's SPI feed is the
         // bottleneck rather than core0's game logic/render -- see
