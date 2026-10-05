@@ -175,7 +175,7 @@ by any Phase B source change; only risk is the shared `usb_hid_host.cpp`
 fix, which that build now exercises via a different, but equivalent,
 code path).
 
-## Phase C — music (not started)
+## Phase C — music (done, hardware-tested: src/mus_player.cpp)
 
 Add MUS-format lump decode + a simple per-channel square/triangle-wave
 synth (not OPL2 FM emulation — explicitly out of scope, a possible future

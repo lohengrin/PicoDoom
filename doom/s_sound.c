@@ -693,7 +693,7 @@ S_ChangeMusic
 ( int			musicnum,
   int			looping )
 {
-#ifdef PICO
+#if defined(PICO) && !defined(PICODOOM_HDMI)
   // No audio output yet -- see S_Init's #ifdef PICO comment. Otherwise this
   // would W_CacheLumpNum() a whole D_* music lump into the zone heap on
   // every level/finale/intermission transition for a driver

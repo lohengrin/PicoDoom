@@ -268,7 +268,7 @@ set(PICODOOM_SOUND_SRC doom/i_sound_null.c)
 if(PICODOOM_VIDEO_OUTPUT STREQUAL "hdmi")
     set(PICODOOM_VIDEO_SRC src/i_video_dvi.cpp)
     # Phase B (SFX) of docs/HDMI_PLAN.md's rollout -- see src/i_sound_dvi.cpp.
-    set(PICODOOM_SOUND_SRC src/i_sound_dvi.cpp)
+    set(PICODOOM_SOUND_SRC src/i_sound_dvi.cpp src/mus_player.cpp)
 elseif(PICODOOM_VIDEO_OUTPUT STREQUAL "lcd-st7796")
     set(PICODOOM_VIDEO_SRC src/i_video_st7796.cpp)
 else()

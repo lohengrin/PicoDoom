@@ -4,10 +4,8 @@
 // I_SetChannels/I_UpdateSound/I_SubmitSound/I_ShutdownSound) against
 // Pico-Toolset's pico_toolset_dvi_hdmi HDMI data-island digital audio,
 // riding the same cable src/i_video_dvi.cpp's picture does -- no extra
-// wiring. Music (I_Init/RegisterSong/PlaySong/etc.) stays stubbed, same as
-// doom/i_sound_null.c -- that's Phase C, not this one; doom/s_sound.c's
-// S_ChangeMusic() is still compiled out for this build (see its own
-// #ifdef PICO, deliberately not widened to !PICODOOM_HDMI yet).
+// wiring. Music (I_RegisterSong/PlaySong/etc., Phase C) is src/mus_player.cpp's
+// MUS parser + chip-tune synth, mixed into mix_tic() below.
 //
 // Selected at configure time (PICODOOM_VIDEO_OUTPUT=hdmi, CMakeLists.txt)
 // alongside src/i_video_dvi.cpp; doom/s_sound.c's own #ifdef PICO gates
@@ -58,6 +56,7 @@
 #include "i_video_dvi.hpp"
 #include "pico/time.h"
 #include "pico_toolset/psram.h"
+#include "mus_player.hpp"
 
 extern "C" {
 #include "doomdef.h"
@@ -230,6 +229,8 @@ void mix_tic() {
         }
     }
 
+    mus_render(g_mix_l, g_mix_r, n);
+
     if (!g_dvi)
         return;
     audio_ring_t& ring = g_dvi->audio_ring;
@@ -375,17 +376,18 @@ void I_UpdateSoundParams(int handle, int vol, int sep, int pitch) {
     }
 }
 
-// Music -- deferred to Phase C (docs/HDMI_PLAN.md), same no-ops as
-// doom/i_sound_null.c. doom/s_sound.c's S_ChangeMusic() never calls any of
-// these on this build (its own #ifdef PICO still returns early).
+// Music (Phase C): MUS lump -> src/mus_player.cpp's software synth, mixed in
+// mix_tic() alongside the SFX voices.
+static const void* g_song = nullptr;
+
 void I_InitMusic(void) {}
-void I_ShutdownMusic(void) {}
-void I_SetMusicVolume(int volume) { (void)volume; }
-void I_PauseSong(int handle) { (void)handle; }
-void I_ResumeSong(int handle) { (void)handle; }
-int I_RegisterSong(void* data) { (void)data; return 0; }
-void I_PlaySong(int handle, int looping) { (void)handle; (void)looping; }
-void I_StopSong(int handle) { (void)handle; }
-void I_UnRegisterSong(int handle) { (void)handle; }
+void I_ShutdownMusic(void) { mus_stop(); }
+void I_SetMusicVolume(int volume) { mus_set_volume(volume); }
+void I_PauseSong(int handle) { (void)handle; mus_pause(); }
+void I_ResumeSong(int handle) { (void)handle; mus_resume(); }
+int I_RegisterSong(void* data) { g_song = data; return 1; }
+void I_PlaySong(int handle, int looping) { (void)handle; mus_start(g_song, looping != 0); }
+void I_StopSong(int handle) { (void)handle; mus_stop(); }
+void I_UnRegisterSong(int handle) { (void)handle; g_song = nullptr; }
 
 } // extern "C"
