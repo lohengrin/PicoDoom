@@ -147,7 +147,11 @@ int g_offset_y = 0;
 // full-frame PSRAM fallback it replaced, due to per-band set_window()
 // command overhead; 100 rows/3 bands cuts that 5x). Carried over unchanged
 // as a starting point -- re-measure on this panel once it's in hand.
-constexpr int kBandRows = 50;
+constexpr int kBandRows = 25;
+// Slot count: 5 x 24KB (480x25x2) = 120KB, sized to what's left of the SRAM
+// heap after screens[0] (144KB) -- more slots buffer more of the frame, which
+// is what shrinks core0-wait (core0 only blocks once every slot is in flight).
+constexpr int kNumSlots = 5;
 // Both supported frame heights (200 and 300) must split into whole bands, and
 // the blit buffers below are sized for the widest mode.
 static_assert(MAX_SCREENHEIGHT % kBandRows == 0, "kBandRows must divide the tallest frame height evenly");
@@ -160,13 +164,13 @@ int g_num_bands = MAX_SCREENHEIGHT / kBandRows;
 int g_band_pixels = MAX_SCREENWIDTH * kBandRows;
 int g_dst_width = MAX_SCREENWIDTH;
 
-uint16_t* g_screen_buf[2] = {nullptr, nullptr};
+uint16_t* g_screen_buf[kNumSlots] = {};
 // true = free for core0 to write screens[0]'s converted pixels into. Flip
 // conventions match PicoUsbKeyboard.cpp's g_active_buf: plain volatile
 // bool, one writer per flag direction (core0 only ever clears its target
 // index, core1 only ever sets the index it just finished), safe on this
 // platform without a lock.
-volatile bool g_blit_buf_free[2] = {true, true};
+volatile bool g_blit_buf_free[kNumSlots] = {true, true, true, true, true};
 
 // --- Stats line (SRAM/PSRAM usage, FPS, timing breakdown) ---
 // See i_video_ili9486.cpp's identically-shaped report_stats_if_due() for
@@ -418,8 +422,8 @@ void I_FinishUpdate(void) {
         g_blit_buf_free[next_idx] = false;
         // Pack (band, slot) into one FIFO word -- i_video_core1_step()
         // decodes both to pick the right window offset and free-flag.
-        multicore_fifo_push_blocking((static_cast<uint32_t>(band) << 1) | static_cast<uint32_t>(next_idx));
-        next_idx ^= 1;
+        multicore_fifo_push_blocking((static_cast<uint32_t>(band) << 3) | static_cast<uint32_t>(next_idx));
+        next_idx = (next_idx + 1) % kNumSlots;
     }
 
     uint64_t now_us = time_us_64();
@@ -514,8 +518,8 @@ void i_video_core1_step() {
         if (!multicore_fifo_rvalid())
             return;
         uint32_t word = multicore_fifo_pop_blocking();
-        g_blit_idx = static_cast<int>(word & 1u);
-        int band = static_cast<int>(word >> 1);
+        g_blit_idx = static_cast<int>(word & 7u);
+        int band = static_cast<int>(word >> 3);
         int y0 = g_offset_y + band * kBandRows;
         g_panel.set_window(g_offset_x, y0,
                             g_offset_x + g_dst_width - 1, y0 + kBandRows - 1);
