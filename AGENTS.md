@@ -160,6 +160,11 @@ guarded (`channels` is NULL under `#ifdef PICO`).
   call) so it interleaves with `UsbHidHost::task()` rather than starving
   Pico-PIO-USB's software-timed bus servicing for the ~41ms a full frame's
   SPI feed takes at 25 MHz.
+- **LCD builds: `screens[0]` lives in SRAM** (`doom/v_video.c` `V_Init`, via
+  `I_TrySramMalloc`, PSRAM fallback; `screens[1..3]` stay PSRAM) and the blit bands are
+  50 rows (2 slots x 48 KB at 480x300) to pay for it. Motivation: stable-state stats
+  showed convert/column writes bound by PSRAM latency. Slots now hold 1/3 of a hires
+  frame, so watch `core0-wait`. HDMI build is unchanged.
 - `r_draw.c`'s `R_InitBuffer()` caches per-row pointers *into* `screens[0]`
   (`ylookup[i] = screens[0] + ...`), refreshed only on view-size changes (the
   menu's screen-size +/- keys) — moot now that `screens[0]` never moves, but

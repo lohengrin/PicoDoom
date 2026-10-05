@@ -215,7 +215,7 @@ int g_offset_y = (pico_toolset::Ili9486::kHeight - MAX_SCREENHEIGHT) / 2;
 // only pays down that per-call command overhead -- 100 rows (3 bands/frame)
 // cuts it 5x vs the 15-band attempt while still using far less SRAM
 // (96000B/buffer, 192000B total) than a full frame would (288000B/buffer).
-constexpr int kBandRows = 100;
+constexpr int kBandRows = 50;
 // Both supported frame heights (200 and 300) must split into whole bands, and
 // the blit buffers below are sized for the widest mode.
 static_assert(MAX_SCREENHEIGHT % kBandRows == 0, "kBandRows must divide the tallest frame height evenly");

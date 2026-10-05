@@ -147,7 +147,7 @@ int g_offset_y = 0;
 // full-frame PSRAM fallback it replaced, due to per-band set_window()
 // command overhead; 100 rows/3 bands cuts that 5x). Carried over unchanged
 // as a starting point -- re-measure on this panel once it's in hand.
-constexpr int kBandRows = 100;
+constexpr int kBandRows = 50;
 // Both supported frame heights (200 and 300) must split into whole bands, and
 // the blit buffers below are sized for the widest mode.
 static_assert(MAX_SCREENHEIGHT % kBandRows == 0, "kBandRows must divide the tallest frame height evenly");

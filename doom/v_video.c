@@ -28,6 +28,8 @@ static const char
 rcsid[] = "$Id: v_video.c,v 1.5 1997/02/03 22:45:13 b1 Exp $";
 
 
+#include <stdio.h>
+#include <string.h>
 #include "i_system.h"
 #include "r_local.h"
 
@@ -571,6 +573,31 @@ void V_Init (void)
 		
     // stick these in low dos memory on PCs
 
+#if defined(PICO) && !defined(PICODOOM_HDMI)
+    /* screens[0] is the hot one: every column/span/sprite/status-bar pixel
+       is written to it and the blit reads all of it each frame, so keep it
+       in SRAM (a fixed address, never moved -- see src/i_video_ili9486.cpp's
+       header on why it must stay put). The other three are cold (border
+       backing, wipe buffers) and stay in PSRAM. I_TrySramMalloc() never
+       panics; fall back to PSRAM if there isn't room. */
+    {
+	extern void *I_TrySramMalloc (size_t);
+	size_t	size = (size_t)SCREENWIDTH*SCREENHEIGHT;
+
+	screens[0] = (byte *) I_TrySramMalloc (size);
+	if (screens[0])
+	    memset (screens[0], 0, size);
+	else
+	{
+	    printf ("V_Init: SRAM short, screens[0] in PSRAM\n");
+	    screens[0] = I_AllocLow (size);
+	}
+	base = I_AllocLow (size*3);
+	for (i=1 ; i<4 ; i++)
+	    screens[i] = base + (i-1)*size;
+	return;
+    }
+#endif
     base = I_AllocLow (SCREENWIDTH*SCREENHEIGHT*4);
 
     for (i=0 ; i<4 ; i++)
