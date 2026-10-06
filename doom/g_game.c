@@ -191,6 +191,7 @@ int             mousex;
 int		mousey;         
 
 int             dclicktime;
+int		mousewheel;	// pending wheel detents, + = next weapon
 int		dclickstate;
 int		dclicks; 
 int             dclicktime2;
@@ -347,6 +348,54 @@ void G_BuildTiccmd (ticcmd_t* cmd)
 	    break; 
 	}
     
+    // mouse wheel: cycle through owned weapons (slot number == BT_WEAPON number)
+    if (mousewheel)
+    {
+	player_t*	wp = &players[consoleplayer];
+	int		slot;
+	int		steps = mousewheel;
+	int		dir = steps > 0 ? 1 : -1;
+	int		cur;
+
+	mousewheel = 0;
+	if (steps < 0)
+	    steps = -steps;
+
+	cur = wp->pendingweapon != wp_nochange ? wp->pendingweapon
+					       : wp->readyweapon;
+	if (cur == wp_chainsaw)
+	    cur = wp_fist;
+	else if (cur == wp_supershotgun)
+	    cur = wp_shotgun;
+	slot = cur;
+
+	if (wp->health > 0)
+	{
+	    while (steps--)
+	    {
+		int	tries;
+		for (tries = 0; tries < wp_bfg + 1; tries++)
+		{
+		    slot = (slot + dir + wp_bfg + 1) % (wp_bfg + 1);
+		    if (slot == wp_fist
+			|| (slot == wp_shotgun
+			    && (wp->weaponowned[wp_shotgun]
+				|| (gamemode == commercial
+				    && wp->weaponowned[wp_supershotgun])))
+			|| (slot != wp_shotgun && wp->weaponowned[slot]
+			    && ((slot != wp_plasma && slot != wp_bfg)
+				|| gamemode != shareware)))
+			break;
+		}
+	    }
+	    if (slot != cur)
+	    {
+		cmd->buttons |= BT_CHANGE;
+		cmd->buttons |= slot<<BT_WEAPONSHIFT;
+	    }
+	}
+    }
+
     // mouse
     if (mousebuttons[mousebforward]) 
 	forward += forwardmove[speed];
@@ -503,6 +552,16 @@ void G_DoLoadLevel (void)
 // 
 boolean G_Responder (event_t* ev) 
 { 
+    /* wheel detents only matter in-game; always eaten so they never
+       pop the menu during demos */
+    if (ev->type == ev_keydown
+	&& (ev->data1 == KEY_MWHEELUP || ev->data1 == KEY_MWHEELDOWN))
+    {
+	if (gamestate == GS_LEVEL && !demoplayback)
+	    mousewheel += (ev->data1 == KEY_MWHEELUP) ? 1 : -1;
+	return true;
+    }
+
     // allow spy mode changes even during the demo
     if (gamestate == GS_LEVEL && ev->type == ev_keydown 
 	&& ev->data1 == KEY_F12 && (singledemo || !deathmatch) )

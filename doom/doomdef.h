@@ -334,6 +334,9 @@ typedef enum
 
 #define KEY_BACKSPACE	127
 #define KEY_PAUSE	0xff
+/* mouse wheel detents, posted as key-down impulses (no key-up) */
+#define KEY_MWHEELUP	(0x80+0x60)
+#define KEY_MWHEELDOWN	(0x80+0x61)
 
 #define KEY_EQUALS	0x3d
 #define KEY_MINUS	0x2d

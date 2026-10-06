@@ -234,6 +234,7 @@ extern "C" void i_input_reset_menu_input(void)
 {
     int dx = 0, dy = 0;
     g_usb_hid.consume_mouse_delta(dx, dy);
+    g_usb_hid.consume_mouse_wheel();
 
     for (int i = 0x04; i < 0x60; ++i)
         g_prev_key_down[i] = g_usb_hid.is_key_down(static_cast<uint8_t>(i));
@@ -370,6 +371,14 @@ extern "C" void I_StartTic(void)
             // MotionNotify handling (doom/i_video.c:
             // `lastmousey - X_event.xmotion.y`).
             dy = -dy;
+            // Wheel detents are impulses: one key-down per detent (G_Responder
+            // turns them into a weapon-cycle counter). Always drained so a
+            // disabled mouse doesn't build up a backlog.
+            int wheel = g_usb_hid.consume_mouse_wheel();
+            if (g_mouse_enabled) {
+                for (; wheel > 0; --wheel) post_key(KEY_MWHEELUP, true);
+                for (; wheel < 0; ++wheel) post_key(KEY_MWHEELDOWN, true);
+            }
             // Matches the original X11 driver's own gate (doom/i_video.c's
             // MotionNotify handling): only post when something actually
             // changed, not an empty event every idle tic.
