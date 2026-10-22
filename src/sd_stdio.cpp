@@ -19,7 +19,11 @@ pico_toolset::SdCard g_sd_card;
 
 extern "C" bool sd_init(void)
 {
+#ifdef PICODOOM_PRESTO
+    return g_sd_card.init(pico_toolset::configs::sdcard::kPimoroniPresto);
+#else
     return g_sd_card.init(pico_toolset::configs::sdcard::kWaveshareRp2350PiZero);
+#endif
 }
 
 // SD-card accessor for the boot WAD-selection menu (Phase 4, src/wad_menu.cpp):

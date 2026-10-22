@@ -22,7 +22,7 @@
 // 2026-09 performance work; unified 252MHz (2026-09), LCD raised to 264MHz
 // (2026-09); ST7796U variant added (2026-09, not yet hardware-validated).
 
-#if !defined(PICODOOM_HDMI) && !defined(PICODOOM_ST7796)
+#if !defined(PICODOOM_HDMI) && !defined(PICODOOM_ST7796) && !defined(PICODOOM_PRESTO)
 #include "pico_toolset/ili9486_configs.h"
 #endif
 #ifdef PICODOOM_ST7796
@@ -32,6 +32,18 @@
 
 namespace picodoom {
 
+#ifdef PICODOOM_PRESTO
+// Pimoroni Presto: toolset preset as-is (APS6404L, 50MHz ceiling, validated by
+// examples/presto at the stock 150MHz clk_sys).
+inline pico_toolset::PsramConfig psram_config() {
+    pico_toolset::PsramConfig c = pico_toolset::configs::psram::kPimoroniPresto;
+    // Stock 150MHz keeps the preset's 50MHz; any overclock runs PSRAM at clk_sys/2
+    // (264MHz -> 132MHz, the same recipe the PiZero LCD builds validated).
+    if (PICODOOM_PRESTO_SYSCLK_MHZ != 150)
+        c.max_clock_hz = PICODOOM_PRESTO_SYSCLK_MHZ * 1'000'000 / 2;
+    return c;
+}
+#else
 inline pico_toolset::PsramConfig psram_config() {
     pico_toolset::PsramConfig c = pico_toolset::configs::psram::kWaveshareRp2350PiZero;
     // Divisor=2 at this build's clk_sys, matching the flash CLKDIV=2
@@ -54,8 +66,9 @@ inline pico_toolset::PsramConfig psram_config() {
 #endif
     return c;
 }
+#endif // PICODOOM_PRESTO
 
-#if !defined(PICODOOM_HDMI) && !defined(PICODOOM_ST7796)
+#if !defined(PICODOOM_HDMI) && !defined(PICODOOM_ST7796) && !defined(PICODOOM_PRESTO)
 inline pico_toolset::Ili9486Config ili9486_config() {
     pico_toolset::Ili9486Config c = pico_toolset::configs::ili9486::kWaveshareRp2350PiZero;
     // Request stays at ~33.33MHz, with clk_peri at the LCD build's 264MHz

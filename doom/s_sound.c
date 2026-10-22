@@ -164,7 +164,7 @@ void S_Init
 {
   int		i;
 
-#if defined(PICO) && !defined(PICODOOM_HDMI)
+#if defined(PICO) && !defined(PICODOOM_AUDIO)
   // LCD build: no audio output (Phase 4, deferred -- see docs/PLAN.md).
   // HDMI build (src/i_sound_dvi.cpp, docs/HDMI_PLAN.md) takes the real path
   // below instead. Keep the volume globals valid (the menu reads/writes
@@ -217,7 +217,7 @@ void S_Start(void)
   int cnum;
   int mnum;
 
-#if defined(PICO) && !defined(PICODOOM_HDMI)
+#if defined(PICO) && !defined(PICODOOM_AUDIO)
   // No audio output yet -- see S_Init's #ifdef PICO comment. channels[] was
   // never allocated, and music picks/loads a WAD lump for nothing (Phase 4
   // deferred), so nothing below is worth running.
@@ -276,7 +276,7 @@ S_StartSoundAtVolume
   int		sfx_id,
   int		volume )
 {
-#if defined(PICO) && !defined(PICODOOM_HDMI)
+#if defined(PICO) && !defined(PICODOOM_AUDIO)
   // No audio output yet -- see S_Init's #ifdef PICO comment.
   return;
 #else
@@ -391,7 +391,7 @@ S_StartSoundAtVolume
   // cache data if necessary
   if (!sfx->data)
   {
-#ifndef PICODOOM_HDMI
+#ifndef PICODOOM_AUDIO
     fprintf( stderr,
 	     "S_StartSoundAtVolume: 16bit and not pre-cached - wtf?\n");
 #endif
@@ -499,7 +499,7 @@ S_StartSound
 
 void S_StopSound(void *origin)
 {
-#if defined(PICO) && !defined(PICODOOM_HDMI)
+#if defined(PICO) && !defined(PICODOOM_AUDIO)
   // No audio output yet -- see S_Init's #ifdef PICO comment.
   return;
 #else
@@ -552,7 +552,7 @@ void S_ResumeSound(void)
 //
 void S_UpdateSounds(void* listener_p)
 {
-#if defined(PICO) && !defined(PICODOOM_HDMI)
+#if defined(PICO) && !defined(PICODOOM_AUDIO)
   // No audio output yet -- see S_Init's #ifdef PICO comment. Called every
   // tic (see d_main.c), so this is the hottest of these no-ops -- worth
   // skipping the channels[] scan entirely rather than just guarding the
@@ -693,7 +693,7 @@ S_ChangeMusic
 ( int			musicnum,
   int			looping )
 {
-#if defined(PICO) && !defined(PICODOOM_HDMI)
+#if defined(PICO) && !defined(PICODOOM_AUDIO)
   // No audio output yet -- see S_Init's #ifdef PICO comment. Otherwise this
   // would W_CacheLumpNum() a whole D_* music lump into the zone heap on
   // every level/finale/intermission transition for a driver

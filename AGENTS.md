@@ -15,6 +15,9 @@ A Raspberry Pi **Pico 2 (RP2350)** port of DOOM.
 - Target hardware (user-specified): **Waveshare RP2350-PiZero** (RP2350B, 16 MB flash,
   8 MB PSRAM on GPIO47, PIO-USB on GPIO28/29, µSD card, and a **Waveshare 3.5" RPi
   LCD (A)** — SPI, ILI9486 controller + XPT2046 touch).
+- Second board: **Pimoroni Presto** (`-DPICODOOM_VIDEO_OUTPUT=presto`, `build-presto/`) --
+  see "Presto variant" below. Written without hardware access: **builds clean, not yet
+  hardware-verified** (phased checkpoints in that section).
 - Output variants (`-DPICODOOM_VIDEO_OUTPUT=`): `lcd` (ILI9486, default, `build/`),
   `lcd-st7796` (ST7796U panel, 132 MHz SPI, `build-st7796/`), `hdmi` (onboard DVI +
   HDMI audio, `build-hdmi/`). All three are playable on real hardware. LCD builds have
@@ -25,6 +28,53 @@ A Raspberry Pi **Pico 2 (RP2350)** port of DOOM.
 - Performance state (2026-10, `lcd-st7796` 480x300): ~33 FPS moving, 35 (tick cap)
   standing still, up from 22.7 at the start of the perf pass -- see "Video" below for
   what got it there and what didn't work.
+
+## Presto variant (Pimoroni Presto, RP2350B)
+
+`cmake -S . -B build-presto -DPICODOOM_VIDEO_OUTPUT=presto [-DPICODOOM_PRESTO_MODE=scanline|palette]
+[-DPICODOOM_PRESTO_BT_CLASSIC=ON|OFF]` (board `pimoroni_presto` from the SDK, defines `PICODOOM_PRESTO`,
+`PICODOOM_AUDIO`, `PICO_FLASH_ASSUME_CORE1_SAFE`; `PICODOOM_PRESTO_PALETTE` in palette mode). Install
+name `PicoDoom-presto-<mode>-<type>`. Hardware: 480x480 ST7701 RGB-parallel panel, FT6236 touch, 8 MB
+PSRAM, uSD (SPI0), piezo GPIO43, QW/ST I2C0 (QwSTPad 0x21), CYW43 radio used for **Bluetooth only**.
+`-DPICODOOM_PRESTO_SYSCLK_MHZ=` (default 264, hardware-verified, 35 FPS; 150 = SDK stock: flash QMI div 2, PSRAM at clk_sys/2 = 132 MHz, CYW43 PIO SPI divider `ceil(sys/75)`; 150 = SDK stock with PSRAM at the toolset's 50 MHz). If a board won't boot or PSRAM fails its self-test, rebuild with 200 or 150.
+
+- **Video** (`src/i_video_presto.cpp`): the game fills the top **480x300** (full width), the lower
+  180 lines are a black band (`St7701Config::visible_height`, no memory behind it). 320x200 is scaled
+  1.5x nearest, 480x300 is native ("High res" boot checkbox, as on the LCD builds; default low-res =
+  tear-free). The RGB bus has no GRAM, so the panel reads SRAM continuously (PSRAM cannot feed it):
+  - `scanline` (default): `Scanline565`, no framebuffer; core1 runs `scanline_task()` and the RAM
+    callback converts one source line per panel line through the 256-entry RGB565 LUT. Low-res reads
+    a 64 KB copy of `screens[0]` taken in `I_FinishUpdate` (tears only during the ~0.2 ms copy);
+    hi-res scans a copy of the top rows (everything above the status bar, as many as SRAM allows -- ~235-252) made each frame, and the status bar straight from `screens[0]` (a full 144 KB copy does not fit). Watch `late-lines`/`missed-frames` in the stats line.
+  - `palette`: `Palette8`, 480x300 byte framebuffer (144 KB) + the panel PIO's hardware palette
+    (`I_SetPalette` -> `set_palette_colour`). Hi-res: `screens[0]` *is* the framebuffer (V_Init hook
+    `i_video_presto_screen0`; zero copy => sprites/menus flicker from tearing, use low-res or scanline for a clean picture); low-res expands 1.5x into it per frame. The black band shows palette
+    entry 0, so pain/pickup flashes tint it.
+  - A full RGB565 framebuffer (288-450 KB) does not fit next to the engine; not offered.
+  - core1 only serves scanout (IRQs + `scanline_task`), all from RAM -- required because Bluetooth
+    bonding erases/programs flash from core0 (`PICO_FLASH_ASSUME_CORE1_SAFE=1`, no
+    multicore_lockout, see the toolset AGENTS.md). Never put flash/PSRAM-touching code on core1.
+  - The LVGL boot menu renders (core0) into an RGB332 480x300 surface scanned out like the game
+    (`lvgl_display_presto.cpp`): the palette-mode framebuffer, or a temporary 144 KB buffer in
+    scanline mode that `i_video_lcd_set_hires()` frees before the engine allocates `screens[0]`.
+- **Input**: `src/hid_source.hpp` (`HidSource`) is the backend-neutral input view; shared event
+  posting is `src/i_input_tic.cpp` (`I_StartTic`), backends are `i_input_usbhid.cpp` (PiZero) and
+  `i_input_presto.cpp` (Bluetooth HID via `pico_toolset_bluetooth_hid` + QwSTPad D-pad/A/B/X/Y/+/-;
+  QwSTPad is pad 0 and ORs into a Bluetooth pad). Pad Start (QwSTPad +) posts Esc, Back (-) posts Tab,
+  on every backend. Touch = FT6236 indev for the boot menu, which also has Pair BT / Forget buttons
+  and a status line (passkey for keyboards). Bonded devices reconnect by themselves; pairing starts
+  automatically when nothing is bonded. Gamepad button order for Bluetooth pads is a guess upstream
+  (`gamepad_raw_buttons()` shows the real usages).
+- **Audio** (`src/i_sound_piezo.cpp`): one PWM voice. SFX = per-sound contour (25 ms windows of
+  zero-crossing pitch + loudness, built at first play), priority-arbitrated; music = MUS sequencer
+  stepped without synthesis (`mus_step`/`mus_lead` in `mus_player.cpp`), lead voice only, preempted
+  by SFX. `doom/s_sound.c` PICO stubs are now gated on `PICODOOM_AUDIO` (hdmi + presto).
+- **LEDs** (`src/i_leds_presto.cpp`, 7 WS2812 on PIO0 SM3): health gradient green(>=100%)->orange(50%)->red(0%) at 25% brightness; 450 ms flashes red (health down), green (health up), blue (any other gain: ammo/armour/weapon/key/power-up). Driven by diffing `players[consoleplayer]` from `i_input_backend_poll()` -- no engine edits; dark outside a level. `i_leds_init()` must run before `cyw43_arch_init()` (PIO0 gpio_base 16).
+- **SRAM** (520 KB): engine statics ~215 KB incl. Bluetooth (~18 KB without lwIP/mbedtls, thanks to
+  `PICO_TOOLSET_BLUETOOTH_NO_WIFI`) -> ~300 KB heap. No blit slots here (the RGB bus needs none).
+- **Hardware checkpoints** (verify in order, per feedback_phased_hardware_rollout): 1) menu appears,
+  touch works, both modes; 2) E1M1 renders in lo/hi res, record FPS/late-lines; 3) QwSTPad plays,
+  BLE keyboard + Classic gamepad pair/reconnect, no hang during bonding; 4) piezo SFX/music.
 
 ## Key reference project (read this first)
 
@@ -73,7 +123,7 @@ the whole point of sharing it with TOM6809.
 
 ```bash
 cmake -S . -B build \
-  -DPICO_SDK_PATH=/home/lohengrin/.pico-sdk/sdk/2.3.0
+  -DPICO_SDK_PATH=/home/lohengrin/.pico-sdk/sdk/2.3.1
 cmake --build build -j$(nproc)   # → build/PicoDoom.uf2
 ```
 
@@ -325,7 +375,9 @@ src/i_video_core1.hpp        # i_video_core1_step(): one band of pending blit wo
 src/i_video_dvi.cpp          # HDMI build's i_video.h impl (g_framebuf + core1 DVI encoder) +, like
                               # i_video_ili9486.cpp, an I_InitGraphics() once-guard and the
                               # i_video_dvi_framebuf()/width()/height() menu accessors
-src/i_input_usbhid.cpp       # ... plus menu glue: i_input_usb_hid() (the UsbHidHost& the menu's indevs
+src/i_input_usbhid.cpp       # (now only the USB backend: HidSource adapter, core1 launch; event posting is in
+                              # src/i_input_tic.cpp, Presto's backend in src/i_input_presto.cpp)
+                              # ... plus menu glue: i_input_hid() (the UsbHidHost& the menu's indevs
                               # read), i_input_menu_usb_task() (HDMI build polls UsbHidHost::task()
                               # from the menu loop; no-op on LCD where core1 owns it), and
                               # i_input_reset_menu_input() (drain mouse delta + re-baseline every

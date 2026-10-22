@@ -8,7 +8,7 @@
 // begins. Then lv_init() + the per-build LVGL display driver
 // (lvgl_display_lcd.cpp / lvgl_display_dvi.cpp), then this file's widgets,
 // then a pump loop (lv_tick_inc + lv_timer_handler +, on the HDMI build,
-// i_input_menu_usb_task() -- the LCD build's core1 already pols the USB
+// i_input_backend_poll() -- the LCD build's core1 already polls the USB
 // stack every loop).
 //
 // Selection is handed to the engine via wad_boot.cpp's
@@ -28,8 +28,8 @@
 #include "hardware/watchdog.h"
 #include "pico_toolset/psram.h"
 #include "pico_toolset/sdcard.h"
-#include "pico_toolset/usb_hid_host.h"
-#ifndef PICODOOM_HDMI
+#include "hid_source.hpp"
+#if !defined(PICODOOM_HDMI) && !defined(PICODOOM_PRESTO)
 #include "pico_toolset/display_panel.h"
 #include "pico_toolset/xpt2046.h"
 #include "pico_toolset/xpt2046_configs.h"
@@ -47,10 +47,14 @@
 // -- external phone-home points (all defined in other src/ TUs) ------------
 extern "C" {
 void I_InitGraphics(void); // i_video_ili9486.cpp / i_video_dvi.cpp (once-guarded)
-void i_input_menu_usb_task(void); // i_input_usbhid.cpp (HDMI build only; no-op on LCD)
-void i_input_reset_menu_input(void); // i_input_usbhid.cpp (edge-latch re-baseline)
-pico_toolset::UsbHidHost& i_input_usb_hid(void); // i_input_usbhid.cpp
-#ifndef PICODOOM_HDMI
+void i_input_reset_menu_input(void); // i_input_tic.cpp (edge-latch re-baseline)
+#if defined(PICODOOM_PRESTO)
+void lvgl_display_presto_init(void); // lvgl_display_presto.cpp
+void lvgl_indev_init_touch_ft6236(void); // lvgl_indev.cpp (Presto's FT6236)
+void presto_bt_start_pairing(void); // i_input_presto.cpp
+void presto_bt_forget_all(void);
+const char* presto_bt_status(void);
+#elif !defined(PICODOOM_HDMI)
 // DisplayPanel&, not the concrete Ili9486/St7796 -- this menu only needs
 // the shared windowed/DMA-streaming contract (see display_panel.h), so it
 // works unchanged for either LCD panel this project supports (see
@@ -63,8 +67,8 @@ void lvgl_indev_init_touch(pico_toolset::Xpt2046Touch& touch); // lvgl_indev.cpp
 void lvgl_display_dvi_init(void); // lvgl_display_dvi.cpp
 #endif
 pico_toolset::SdCard& sd_card(void); // sd_stdio.cpp
-void lvgl_indev_init_mouse(pico_toolset::UsbHidHost& usb, int canvas_w, int canvas_h);
-void lvgl_indev_init_keypad(pico_toolset::UsbHidHost& usb, lv_group_t* group);
+void lvgl_indev_init_mouse(HidSource& hid, int canvas_w, int canvas_h);
+void lvgl_indev_init_keypad(HidSource& hid, lv_group_t* group);
 bool lvgl_indev_input_seen(void);
 void lvgl_indev_input_seen_clear(void);
 void lvgl_indev_hide_cursor(void);
@@ -169,7 +173,9 @@ extern "C" bool wad_menu_run(bool sd_available)
     lv_init();
 
     lv_display_t* disp = nullptr;
-#ifndef PICODOOM_HDMI
+#if defined(PICODOOM_PRESTO)
+    lvgl_display_presto_init();
+#elif !defined(PICODOOM_HDMI)
     lvgl_display_lcd_init();
 #else
     lvgl_display_dvi_init();
@@ -255,7 +261,12 @@ extern "C" bool wad_menu_run(bool sd_available)
     // WAD buttons: one per IWAD, one column filling the area between the
     // title block and the bottom hint row.
     lv_obj_t* list = lv_obj_create(scr);
-    lv_obj_set_size(list, hor_res - 2 * scale_x(16), ver_res - scale_y(64) - scale_y(40));
+#ifdef PICODOOM_PRESTO
+    constexpr int kBtRowRef = 22; // Bluetooth status row above the hint
+#else
+    constexpr int kBtRowRef = 0;
+#endif
+    lv_obj_set_size(list, hor_res - 2 * scale_x(16), ver_res - scale_y(64) - scale_y(40 + kBtRowRef));
     lv_obj_align(list, LV_ALIGN_TOP_MID, 0, scale_y(64));
     lv_obj_set_scroll_dir(list, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_AUTO);
@@ -341,6 +352,30 @@ extern "C" bool wad_menu_run(bool sd_available)
     }
 #endif
 
+#ifdef PICODOOM_PRESTO
+    // Bluetooth: status line (connections / pairing passkey) and Pair / Forget buttons.
+    lv_obj_t* bt_label = lv_label_create(scr);
+    lv_label_set_text(bt_label, presto_bt_status());
+    lv_obj_set_style_text_font(bt_label, &lv_font_montserrat_12, 0);
+    lv_obj_align(bt_label, LV_ALIGN_BOTTOM_MID, 0, -scale_y(8 + kBtRowRef - 4));
+    if (sd_available) {
+        auto make_bt_button = [&](const char* text, int x_off, lv_event_cb_t cb) {
+            lv_obj_t* b = lv_button_create(scr);
+            lv_obj_set_size(b, scale_x(76), scale_y(26));
+            lv_obj_align(b, LV_ALIGN_BOTTOM_RIGHT, -scale_x(x_off), -scale_y(6));
+            lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, nullptr);
+            style_nav_button(b);
+            lv_obj_t* l = lv_label_create(b);
+            lv_label_set_text(l, text);
+            lv_obj_set_style_text_font(l, &lv_font_montserrat_12, 0);
+            lv_obj_center(l);
+            lv_group_add_obj(group, b);
+        };
+        make_bt_button("Pair BT", 90, [](lv_event_t*) { presto_bt_start_pairing(); });
+        make_bt_button("Forget", 8, [](lv_event_t*) { presto_bt_forget_all(); });
+    }
+#endif
+
     lv_obj_add_event_cb(scr, screen_key_event_cb, LV_EVENT_KEY, nullptr);
 
     if (reboot_btn != nullptr)
@@ -351,8 +386,10 @@ extern "C" bool wad_menu_run(bool sd_available)
     // ------------------------------------------------------------------
     // Indevs
     // ------------------------------------------------------------------
-    lvgl_indev_init_mouse(i_input_usb_hid(), hor_res, ver_res);
-#ifndef PICODOOM_HDMI
+    lvgl_indev_init_mouse(i_input_hid(), hor_res, ver_res);
+#if defined(PICODOOM_PRESTO)
+    lvgl_indev_init_touch_ft6236();
+#elif !defined(PICODOOM_HDMI)
     // Xpt2046Touch must outlive the pump loop -- touch_read_cb dereferences
     // the pointer we hand to lvgl_indev_init_touch on every LVGL tick.
     pico_toolset::Xpt2046Touch touch;
@@ -363,7 +400,7 @@ extern "C" bool wad_menu_run(bool sd_available)
     }
     lvgl_indev_init_touch(touch);
 #endif
-    lvgl_indev_init_keypad(i_input_usb_hid(), group);
+    lvgl_indev_init_keypad(i_input_hid(), group);
 
     // ------------------------------------------------------------------
     // Pump loop with 30s auto-start countdown
@@ -384,7 +421,17 @@ extern "C" bool wad_menu_run(bool sd_available)
             last_tick = now;
         }
         lv_timer_handler();
-        i_input_menu_usb_task();
+        i_input_backend_poll();
+#ifdef PICODOOM_PRESTO
+        {
+            static uint32_t last_bt_ms = 0;
+            const uint32_t t = to_ms_since_boot(get_absolute_time());
+            if (t - last_bt_ms >= 250) {
+                last_bt_ms = t;
+                lv_label_set_text(bt_label, presto_bt_status());
+            }
+        }
+#endif
 
         if (lvgl_indev_input_seen()) {
             lvgl_indev_input_seen_clear();

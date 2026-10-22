@@ -24,3 +24,8 @@ void mus_set_volume(int volume);
 // Adds `n` samples of 44100Hz mono music, centered, into both buffers.
 // Cheap no-op when nothing is playing or fading out.
 void mus_render(float* mix_l, float* mix_r, int n);
+
+// Tone-output helpers (no synthesis), for the single-voice piezo build.
+void mus_step(int ticks);                    // advance the score by `ticks` MUS ticks (140 Hz)
+bool mus_lead(float* hz, float* level);      // melody voice pitch / loudness (0..1), false if silent
+bool mus_is_playing();

@@ -22,9 +22,6 @@ cmake_minimum_required(VERSION 3.13)
 # PICO_BOARD must be defined BEFORE pico_sdk_import.cmake: its
 # pico_pre_load_platform runs at include time and decides the toolchain/platform
 # (rp2350 vs rp2040) from it.
-if(NOT DEFINED PICO_BOARD)
-    set(PICO_BOARD waveshare_rp2350_pizero CACHE STRING "Board type" FORCE)
-endif()
 set(PICO_BOARD_HEADER_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/pico-toolset/boards CACHE STRING "" FORCE)
 
 # Output driver: "lcd" (default, external Waveshare ILI9486 SPI panel),
@@ -41,10 +38,33 @@ set(PICO_BOARD_HEADER_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/pico-toolset/
 # link -- see the `NOT PICODOOM_VIDEO_OUTPUT STREQUAL "hdmi"` checks below
 # for that shared branch, and the nested check for the two LCD panels' own
 # differences.
-set(PICODOOM_VIDEO_OUTPUT "lcd" CACHE STRING "Output driver: lcd | lcd-st7796 | hdmi")
-set_property(CACHE PICODOOM_VIDEO_OUTPUT PROPERTY STRINGS lcd lcd-st7796 hdmi)
-if(NOT PICODOOM_VIDEO_OUTPUT STREQUAL "lcd" AND NOT PICODOOM_VIDEO_OUTPUT STREQUAL "lcd-st7796" AND NOT PICODOOM_VIDEO_OUTPUT STREQUAL "hdmi")
-    message(FATAL_ERROR "PICODOOM_VIDEO_OUTPUT must be 'lcd', 'lcd-st7796', or 'hdmi', got '${PICODOOM_VIDEO_OUTPUT}'")
+set(PICODOOM_VIDEO_OUTPUT "lcd" CACHE STRING "Output driver: lcd | lcd-st7796 | hdmi | presto")
+set_property(CACHE PICODOOM_VIDEO_OUTPUT PROPERTY STRINGS lcd lcd-st7796 hdmi presto)
+if(NOT PICODOOM_VIDEO_OUTPUT MATCHES "^(lcd|lcd-st7796|hdmi|presto)$")
+    message(FATAL_ERROR "PICODOOM_VIDEO_OUTPUT must be 'lcd', 'lcd-st7796', 'hdmi', or 'presto', got '${PICODOOM_VIDEO_OUTPUT}'")
+endif()
+
+# "presto": Pimoroni Presto (RP2350B, 480x480 ST7701 RGB-parallel panel, FT6236
+# touch, uSD, piezo, QW/ST QwSTPad, Bluetooth HID via the CYW43 radio -- no
+# Wi-Fi, no USB host). PICODOOM_PRESTO_MODE picks how the panel is fed:
+#   scanline (default): no framebuffer, core1 converts one line at a time just
+#                       ahead of the beam (St7701Format::Scanline565)
+#   palette:            480x300 8-bit framebuffer expanded by the panel PIO
+#                       (St7701Format::Palette8)
+# Both are explained in src/i_video_presto.cpp. A full RGB565 framebuffer does
+# not fit next to the engine + Bluetooth in 520 KB of SRAM.
+set(PICODOOM_PRESTO_MODE "scanline" CACHE STRING "Presto panel feed: scanline | palette")
+set_property(CACHE PICODOOM_PRESTO_MODE PROPERTY STRINGS scanline palette)
+set(PICODOOM_PRESTO_SYSCLK_MHZ 264 CACHE STRING "Presto clk_sys in MHz (264 hardware-verified, 150 = SDK stock)")
+option(PICODOOM_PRESTO_BT_CLASSIC "Presto: also support Bluetooth Classic HID (older gamepads/keyboards)" ON)
+if(PICODOOM_VIDEO_OUTPUT STREQUAL "presto")
+    if(NOT PICODOOM_PRESTO_MODE MATCHES "^(scanline|palette)$")
+        message(FATAL_ERROR "PICODOOM_PRESTO_MODE must be 'scanline' or 'palette', got '${PICODOOM_PRESTO_MODE}'")
+    endif()
+    # SDK board header (pico-sdk >= 2.3): pins, PSRAM CS, 16 MB flash.
+    set(PICO_BOARD pimoroni_presto CACHE STRING "Board type" FORCE)
+elseif(NOT DEFINED PICO_BOARD)
+    set(PICO_BOARD waveshare_rp2350_pizero CACHE STRING "Board type" FORCE)
 endif()
 
 # initialize the SDK based on PICO_SDK_PATH
@@ -75,7 +95,30 @@ set(PICO_TOOLSET_BUILD_I2S_AUDIO OFF CACHE BOOL "" FORCE)
 set(PICO_TOOLSET_BUILD_RESET_BUTTONS OFF CACHE BOOL "" FORCE)
 set(PICO_TOOLSET_BUILD_SCREEN OFF CACHE BOOL "" FORCE)
 set(PICO_TOOLSET_BUILD_ST7789 OFF CACHE BOOL "" FORCE) # unused by either LCD panel this project supports
-if(PICODOOM_VIDEO_OUTPUT STREQUAL "hdmi")
+# Never used by any variant here.
+foreach(_unused BME280 LTR559 LSM6DS3 EPD_2IN13_V4 JSON RGB_LED FLASH_STORE USB_COMPOSITE)
+    set(PICO_TOOLSET_BUILD_${_unused} OFF CACHE BOOL "" FORCE)
+endforeach()
+# Presto-only drivers, off elsewhere.
+foreach(_presto_only ST7701 FT6236 PIEZO QWSTPAD WS2812)
+    set(PICO_TOOLSET_BUILD_${_presto_only} OFF CACHE BOOL "" FORCE)
+endforeach()
+set(PICO_TOOLSET_BUILD_BLUETOOTH OFF CACHE BOOL "" FORCE)
+set(PICO_TOOLSET_BUILD_BLUETOOTH_HID OFF CACHE BOOL "" FORCE)
+if(PICODOOM_VIDEO_OUTPUT STREQUAL "presto")
+    set(PICO_TOOLSET_BUILD_ILI9486 OFF CACHE BOOL "" FORCE)
+    set(PICO_TOOLSET_BUILD_ST7796 OFF CACHE BOOL "" FORCE)
+    set(PICO_TOOLSET_BUILD_DVI_HDMI OFF CACHE BOOL "" FORCE)
+    set(PICO_TOOLSET_DVI_HDMI_AUDIO OFF CACHE BOOL "" FORCE)
+    set(PICO_TOOLSET_BUILD_XPT2046 OFF CACHE BOOL "" FORCE)
+    set(PICO_TOOLSET_BUILD_USB_HID OFF CACHE BOOL "" FORCE) # no PIO-USB host on the Presto
+    foreach(_presto_only ST7701 FT6236 PIEZO QWSTPAD WS2812 BLUETOOTH BLUETOOTH_HID)
+        set(PICO_TOOLSET_BUILD_${_presto_only} ON CACHE BOOL "" FORCE)
+    endforeach()
+    # Bluetooth only: cyw43_arch_none + BTstack, no lwIP/mbedtls (~45 KB SRAM saved).
+    set(PICO_TOOLSET_BLUETOOTH_NO_WIFI ON CACHE BOOL "" FORCE)
+    set(PICO_TOOLSET_BLUETOOTH_CLASSIC ${PICODOOM_PRESTO_BT_CLASSIC} CACHE BOOL "" FORCE)
+elseif(PICODOOM_VIDEO_OUTPUT STREQUAL "hdmi")
     set(PICO_TOOLSET_BUILD_ILI9486 OFF CACHE BOOL "" FORCE)
     set(PICO_TOOLSET_BUILD_ST7796 OFF CACHE BOOL "" FORCE)
     set(PICO_TOOLSET_BUILD_DVI_HDMI ON CACHE BOOL "" FORCE)
@@ -153,6 +196,8 @@ set(PICODOOM_MENU_SRC
 )
 if(PICODOOM_VIDEO_OUTPUT STREQUAL "hdmi")
     list(APPEND PICODOOM_MENU_SRC src/lvgl_display_dvi.cpp)
+elseif(PICODOOM_VIDEO_OUTPUT STREQUAL "presto")
+    list(APPEND PICODOOM_MENU_SRC src/lvgl_display_presto.cpp)
 else()
     list(APPEND PICODOOM_MENU_SRC src/lvgl_display_lcd.cpp)
 endif()
@@ -269,10 +314,19 @@ if(PICODOOM_VIDEO_OUTPUT STREQUAL "hdmi")
     set(PICODOOM_VIDEO_SRC src/i_video_dvi.cpp)
     # Phase B (SFX) of docs/HDMI_PLAN.md's rollout -- see src/i_sound_dvi.cpp.
     set(PICODOOM_SOUND_SRC src/i_sound_dvi.cpp src/mus_player.cpp)
+elseif(PICODOOM_VIDEO_OUTPUT STREQUAL "presto")
+    set(PICODOOM_VIDEO_SRC src/i_video_presto.cpp)
+    # Single piezo voice -- see src/i_sound_piezo.cpp.
+    set(PICODOOM_SOUND_SRC src/i_sound_piezo.cpp src/mus_player.cpp)
 elseif(PICODOOM_VIDEO_OUTPUT STREQUAL "lcd-st7796")
     set(PICODOOM_VIDEO_SRC src/i_video_st7796.cpp)
 else()
     set(PICODOOM_VIDEO_SRC src/i_video_ili9486.cpp)
+endif()
+if(PICODOOM_VIDEO_OUTPUT STREQUAL "presto")
+    set(PICODOOM_INPUT_SRC src/i_input_presto.cpp src/i_leds_presto.cpp)
+else()
+    set(PICODOOM_INPUT_SRC src/i_input_usbhid.cpp)
 endif()
 
 # rest of your project
@@ -281,7 +335,8 @@ src/PicoDoom.cpp
 src/sd_stdio.cpp
 src/i_frame_stats.cpp
 ${PICODOOM_VIDEO_SRC}
-src/i_input_usbhid.cpp
+src/i_input_tic.cpp
+${PICODOOM_INPUT_SRC}
 src/i_serial_console.cpp
 ${PICODOOM_SOUND_SRC}
 ${PICODOOM_MENU_SRC}
@@ -337,8 +392,15 @@ target_link_libraries(PicoDoom
     $<$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},lcd>:pico_toolset_ili9486>
     $<$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},lcd-st7796>:pico_toolset_st7796>
     $<$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},hdmi>:pico_toolset_dvi_hdmi>
-    $<$<NOT:$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},hdmi>>:pico_toolset_xpt2046>
-    pico_toolset_usb_hid
+    $<$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},presto>:pico_toolset_st7701>
+    $<$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},presto>:pico_toolset_ft6236>
+    $<$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},presto>:pico_toolset_qwstpad>
+    $<$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},presto>:pico_toolset_piezo>
+    $<$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},presto>:pico_toolset_ws2812>
+    $<$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},presto>:pico_toolset_bluetooth_hid>
+    $<$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},lcd>:pico_toolset_xpt2046>
+    $<$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},lcd-st7796>:pico_toolset_xpt2046>
+    $<$<NOT:$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},presto>>:pico_toolset_usb_hid>
     pico_multicore
     hardware_watchdog
     lvgl::lvgl
@@ -350,6 +412,11 @@ target_include_directories(PicoDoom PRIVATE
 )
 
 target_compile_definitions(PicoDoom PRIVATE PICO)
+# PICODOOM_AUDIO: the build has a real sound backend (doom/s_sound.c's PICO stubs
+# are compiled out): HDMI (src/i_sound_dvi.cpp) and Presto (src/i_sound_piezo.cpp).
+if(PICODOOM_VIDEO_OUTPUT STREQUAL "hdmi" OR PICODOOM_VIDEO_OUTPUT STREQUAL "presto")
+    target_compile_definitions(PicoDoom PRIVATE PICODOOM_AUDIO=1)
+endif()
 if(PICODOOM_VIDEO_OUTPUT STREQUAL "hdmi")
     # PICODOOM_HDMI drives the #ifdef split in src/i_input_usbhid.cpp (USB
     # HID host moves from core1 to core0 -- core1 belongs to the DVI encode
@@ -363,6 +430,18 @@ if(PICODOOM_VIDEO_OUTPUT STREQUAL "hdmi")
     # build's uSD wiring may not need it itself -- don't rely on the
     # LCD-build comment below, which is about a different PIO consumer.
     target_compile_definitions(PicoDoom PRIVATE PICO_PIO_USE_GPIO_BASE=1)
+elseif(PICODOOM_VIDEO_OUTPUT STREQUAL "presto")
+    target_compile_definitions(PicoDoom PRIVATE PICODOOM_PRESTO=1 PICODOOM_PRESTO_SYSCLK_MHZ=${PICODOOM_PRESTO_SYSCLK_MHZ})
+    # CYW43 PIO SPI must stay <= ~37MHz: divider = ceil(clk_sys / 75) (150->2 SDK default, 200->3, 264->4).
+    math(EXPR _cyw43_div "(${PICODOOM_PRESTO_SYSCLK_MHZ} + 74) / 75")
+    target_compile_definitions(PicoDoom PRIVATE CYW43_PIO_CLOCK_DIV_INT=${_cyw43_div})
+    if(PICODOOM_PRESTO_MODE STREQUAL "palette")
+        target_compile_definitions(PicoDoom PRIVATE PICODOOM_PRESTO_PALETTE=1)
+    endif()
+    # Bluetooth bonding erases/programs flash from core0 while core1 keeps the panel
+    # scanned out; core1 runs only RAM code (src/i_video_presto.cpp), so tell the SDK
+    # it need not lock it out (a multicore_lockout victim would also steal core1's FIFO).
+    target_compile_definitions(PicoDoom PRIVATE PICO_FLASH_ASSUME_CORE1_SAFE=1)
 elseif(PICODOOM_VIDEO_OUTPUT STREQUAL "lcd-st7796")
     # Distinguishes the two LCD panel variants for src/board_config.hpp's
     # panel-specific config functions -- both are "not hdmi" so PICODOOM_HDMI
@@ -390,6 +469,9 @@ endif()
 # this exact block -- see that target for the full derivation of what each
 # one does and why it was found the hard way.
 
+if(PICODOOM_VIDEO_OUTPUT STREQUAL "presto")
+    set(PICODOOM_INSTALL_MODE_SUFFIX "-${PICODOOM_PRESTO_MODE}")
+endif()
 pico_enable_stdio_usb(PicoDoom 1)
 pico_enable_stdio_uart(PicoDoom 0)
 
@@ -407,7 +489,7 @@ string(TOLOWER "${CMAKE_BUILD_TYPE}" PICODOOM_INSTALL_BUILD_TYPE)
 if(NOT PICODOOM_INSTALL_BUILD_TYPE)
     set(PICODOOM_INSTALL_BUILD_TYPE "default")
 endif()
-set(PICODOOM_INSTALL_NAME "PicoDoom-${PICODOOM_VIDEO_OUTPUT}-${PICODOOM_INSTALL_BUILD_TYPE}")
+set(PICODOOM_INSTALL_NAME "PicoDoom-${PICODOOM_VIDEO_OUTPUT}${PICODOOM_INSTALL_MODE_SUFFIX}-${PICODOOM_INSTALL_BUILD_TYPE}")
 set(PICODOOM_INSTALL_DIR "${CMAKE_SOURCE_DIR}/install" CACHE PATH "Where the install target puts the uf2/bin images")
 install(FILES "$<TARGET_FILE_DIR:PicoDoom>/PicoDoom.uf2"
         DESTINATION "${PICODOOM_INSTALL_DIR}" RENAME "${PICODOOM_INSTALL_NAME}.uf2")

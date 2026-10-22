@@ -385,3 +385,55 @@ void mus_render(float* mix_l, float* mix_r, int n) {
         }
     }
 }
+
+// ---- tone-output helpers (single-voice piezo, src/i_sound_piezo.cpp) -------
+// The sequencer half of mus_render() without any synthesis: advances the score
+// by `ticks` MUS ticks and ages voice envelopes in tick units, so mus_lead()
+// can pick a melody note. No float buffers, a few microseconds per tick.
+void mus_step(int ticks) {
+    if (!g_playing || g_paused)
+        return;
+    for (; ticks > 0 && g_playing; --ticks) {
+        for (Voice& v : g_voice) {
+            if (!v.active)
+                continue;
+            v.env *= std::pow(v.decay, static_cast<float>(kSamplesPerTick));
+            if (v.env < kSilence)
+                v.active = false;
+        }
+        if (g_delay_ticks > 0)
+            --g_delay_ticks;
+        if (g_delay_ticks == 0)
+            run_events();
+    }
+}
+
+// Highest-weighted active melodic voice (percussion and noise are skipped).
+// *hz is its pitch, *level 0..1 its current loudness (velocity x envelope).
+bool mus_lead(float* hz, float* level) {
+    const Voice* best = nullptr;
+    float best_score = 0.0f;
+    float best_level = 0.0f;
+    for (const Voice& v : g_voice) {
+        if (!v.active || v.released || v.chan == kPercussionChannel || v.shape == Noise)
+            continue;
+        const Channel& c = g_chan[v.chan];
+        const float amp = (static_cast<float>(v.vel) / 127.0f) * (static_cast<float>(c.volume) / 127.0f)
+                          * (static_cast<float>(c.expression) / 127.0f) * v.env;
+        const float score = amp * (0.5f + static_cast<float>(v.note) / 127.0f);
+        if (score > best_score) {
+            best = &v;
+            best_score = score;
+            best_level = amp;
+        }
+    }
+    if (!best || best_level < 0.05f)
+        return false;
+    *hz = note_freq(best->note, g_chan[best->chan].bend);
+    *level = best_level > 1.0f ? 1.0f : best_level;
+    return true;
+}
+
+bool mus_is_playing() {
+    return g_playing && !g_paused;
+}

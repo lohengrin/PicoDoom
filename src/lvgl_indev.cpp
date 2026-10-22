@@ -26,8 +26,11 @@
 // (see wad_menu.cpp). Held state re-marks it every poll -- harmless: the
 // menu clears the flag once after noticing it, so holding a key still stops
 // (and has stopped) the countdown.
-#include "pico_toolset/usb_hid_host.h"
-#ifndef PICODOOM_HDMI
+#include "hid_source.hpp"
+#if defined(PICODOOM_PRESTO)
+#include "pico_toolset/ft6236.h"
+#include "pico_toolset/ft6236_configs.h"
+#elif !defined(PICODOOM_HDMI)
 #include "pico_toolset/display_panel.h"
 #include "pico_toolset/xpt2046.h"
 #include "pico_toolset/xpt2046_calibration.h"
@@ -36,7 +39,7 @@
 
 #include <cstdint>
 
-#ifndef PICODOOM_HDMI
+#if !defined(PICODOOM_HDMI) && !defined(PICODOOM_PRESTO)
 // DisplayPanel&, not the concrete Ili9486/St7796 -- see wad_menu.cpp's
 // identically-declared forward decl for why (works unchanged for either LCD
 // panel this project supports).
@@ -52,7 +55,7 @@ lv_obj_t* g_cursor = nullptr; // crosshair, hidden on the loading screen
 // pointer + mouse
 // ---------------------------------------------------------------------------
 struct MouseCtx {
-    pico_toolset::UsbHidHost* usb = nullptr;
+    HidSource* usb = nullptr;
     // Scale factor from the host's canonical 640x480 cursor space into this
     // LVGL canvas. LCD: 480/640, 320/480. DVI (320x240 canvas): 320/640,
     // 240/480.
@@ -71,7 +74,7 @@ void mouse_read_cb(lv_indev_t* indev, lv_indev_data_t* data)
         return;
     }
 
-    pico_toolset::UsbHidHost::MouseState mouse = ctx.usb->mouse_state();
+    HidMouse mouse = ctx.usb->mouse_state();
     if (!mouse.present) {
         data->state = LV_INDEV_STATE_RELEASED;
         return;
@@ -90,7 +93,7 @@ void mouse_read_cb(lv_indev_t* indev, lv_indev_data_t* data)
     ctx.pos_y = new_y;
     ctx.have_pos = true;
 
-    const bool pressed = mouse.left_button || mouse.right_button || mouse.middle_button;
+    const bool pressed = mouse.left || mouse.right || mouse.middle;
     if (pressed || moved)
         g_input_seen = true;
 
@@ -102,7 +105,25 @@ void mouse_read_cb(lv_indev_t* indev, lv_indev_data_t* data)
 // ---------------------------------------------------------------------------
 // pointer + touch (LCD build only)
 // ---------------------------------------------------------------------------
-#ifndef PICODOOM_HDMI
+#if defined(PICODOOM_PRESTO)
+pico_toolset::Ft6236 g_ft6236;
+
+void touch_read_cb(lv_indev_t* indev, lv_indev_data_t* data)
+{
+    (void)indev;
+    const pico_toolset::TouchSample t = g_ft6236.read();
+    if (!t.pressed) {
+        data->state = LV_INDEV_STATE_RELEASED;
+        return;
+    }
+    // Presto's FT6236 reports panel pixels directly (kPimoroniPrestoFullRes
+    // scales to 480x480); the menu canvas is the top 480x300 of the panel.
+    g_input_seen = true;
+    data->point.x = t.raw_x;
+    data->point.y = t.raw_y;
+    data->state = LV_INDEV_STATE_PRESSED;
+}
+#elif !defined(PICODOOM_HDMI)
 void touch_read_cb(lv_indev_t* indev, lv_indev_data_t* data)
 {
     auto& touch = *static_cast<pico_toolset::Xpt2046Touch*>(lv_indev_get_user_data(indev));
@@ -139,7 +160,7 @@ void touch_read_cb(lv_indev_t* indev, lv_indev_data_t* data)
 // ---------------------------------------------------------------------------
 void keypad_read_cb(lv_indev_t* indev, lv_indev_data_t* data)
 {
-    auto* usb = static_cast<pico_toolset::UsbHidHost*>(lv_indev_get_user_data(indev));
+    auto* usb = static_cast<HidSource*>(lv_indev_get_user_data(indev));
     data->key = 0;
     data->state = LV_INDEV_STATE_RELEASED;
     if (usb == nullptr)
@@ -182,7 +203,7 @@ void keypad_read_cb(lv_indev_t* indev, lv_indev_data_t* data)
 
 } // namespace
 
-extern "C" void lvgl_indev_init_mouse(pico_toolset::UsbHidHost& usb, int canvas_w, int canvas_h)
+extern "C" void lvgl_indev_init_mouse(HidSource& usb, int canvas_w, int canvas_h)
 {
     g_mouse.usb = &usb;
     if (canvas_w > 0 && canvas_h > 0) {
@@ -218,7 +239,15 @@ extern "C" void lvgl_indev_init_mouse(pico_toolset::UsbHidHost& usb, int canvas_
     g_cursor = cursor;
 }
 
-#ifndef PICODOOM_HDMI
+#if defined(PICODOOM_PRESTO)
+extern "C" void lvgl_indev_init_touch_ft6236(void)
+{
+    g_ft6236.init(pico_toolset::configs::ft6236::kPimoroniPrestoFullRes);
+    lv_indev_t* indev = lv_indev_create();
+    lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
+    lv_indev_set_read_cb(indev, touch_read_cb);
+}
+#elif !defined(PICODOOM_HDMI)
 extern "C" void lvgl_indev_init_touch(pico_toolset::Xpt2046Touch& touch)
 {
     lv_indev_t* indev = lv_indev_create();
@@ -228,7 +257,7 @@ extern "C" void lvgl_indev_init_touch(pico_toolset::Xpt2046Touch& touch)
 }
 #endif
 
-extern "C" void lvgl_indev_init_keypad(pico_toolset::UsbHidHost& usb, lv_group_t* group)
+extern "C" void lvgl_indev_init_keypad(HidSource& usb, lv_group_t* group)
 {
     lv_indev_t* indev = lv_indev_create();
     lv_indev_set_type(indev, LV_INDEV_TYPE_KEYPAD);

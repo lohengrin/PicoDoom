@@ -22,7 +22,9 @@ extern "C" bool sd_init(void);
 extern "C" void i_video_lcd_set_hires(int hires); // src/i_video_{ili9486,st7796}.cpp
 #endif
 extern "C" bool wad_menu_run(bool sd_available); // src/wad_menu.cpp (Phase 4 boot WAD-selection menu)
-#ifndef PICODOOM_HDMI
+#if defined(PICODOOM_PRESTO)
+extern "C" void presto_input_init(void); // src/i_input_presto.cpp (QwSTPad + Bluetooth HID)
+#elif !defined(PICODOOM_HDMI)
 extern "C" void usb_hid_core1_init(void); // src/i_input_usbhid.cpp
 #else
 extern "C" void usb_hid_core0_init(void); // src/i_input_usbhid.cpp
@@ -101,6 +103,11 @@ int main(void)
     sleep_ms(10);
 #ifdef PICODOOM_HDMI
     set_sys_clock_khz(252'000, true);
+#elif defined(PICODOOM_PRESTO)
+    // Presto: PICODOOM_PRESTO_SYSCLK_MHZ (CMake, default 264 like the LCD builds; 150 = stock).
+    // The ST7701 driver derives its dot clock from clk_sys (capped at 34MHz), PSRAM follows
+    // via board_config.hpp, and CMake scales the CYW43 PIO SPI divider with it.
+    set_sys_clock_khz(PICODOOM_PRESTO_SYSCLK_MHZ * 1000, true);
 #else
     set_sys_clock_khz(264'000, true);
 #endif
@@ -120,7 +127,10 @@ int main(void)
     // Re-source clk_peri from clk_sys explicitly instead of flipping that
     // global SDK build option, so this stays a one-line, self-contained
     // decision here rather than a build-wide default.
+#ifndef PICODOOM_PRESTO // Presto keeps clk_peri on the 48MHz USB PLL (uSD SPI0 only)
     clock_configure_undivided(clk_peri, 0, CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLK_SYS, clock_get_hz(clk_sys));
+#endif
+
 
     stdio_init_all();
     // Wait up to 5 seconds (5000 ms) for a USB CDC terminal to attach
@@ -180,7 +190,10 @@ int main(void)
     // src/i_input_usbhid.cpp). LCD build: its own core1. HDMI build: core0
     // (core1 belongs to src/i_video_dvi.cpp's DVI encode loop instead) --
     // see src/i_input_usbhid.cpp's file header for why.
-#ifndef PICODOOM_HDMI
+#if defined(PICODOOM_PRESTO)
+    printf("PicoDoom: QwSTPad + Bluetooth HID init...\n");
+    presto_input_init();
+#elif !defined(PICODOOM_HDMI)
     printf("PicoDoom: USB-PIO keyboard host init (core1)...\n");
     usb_hid_core1_init();
 #else

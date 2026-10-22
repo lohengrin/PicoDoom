@@ -584,6 +584,12 @@ void V_Init (void)
 	extern void *I_TrySramMalloc (size_t);
 	size_t	size = (size_t)SCREENWIDTH*SCREENHEIGHT;
 
+#ifdef PICODOOM_PRESTO
+	/* Presto palette mode, hi-res: screens[0] IS the panel's framebuffer. */
+	extern byte *i_video_presto_screen0 (size_t);
+	screens[0] = i_video_presto_screen0 (size);
+	if (!screens[0])
+#endif
 	screens[0] = (byte *) I_TrySramMalloc (size);
 	if (screens[0])
 	    memset (screens[0], 0, size);

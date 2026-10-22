@@ -1,0 +1,486 @@
+// Video driver for the Pimoroni Presto (PICODOOM_VIDEO_OUTPUT=presto): a 480x480
+// ST7701 RGB-parallel panel scanned out continuously by PIO + DMA
+// (pico_toolset::St7701, served by core1's interrupts). The game occupies the
+// top 480x300 of the panel -- full width, black band at the bottom -- either
+// natively (480x300, "High res") or as 320x200 scaled by 1.5 (nearest).
+//
+// The RGB bus has no GRAM to leave pixels in, so there is no band hashing /
+// blit pipeline here; what reaches the panel is whatever the scanout reads
+// from SRAM (PSRAM cannot feed the DMA at pixel rate). Two build-time modes
+// (-DPICODOOM_PRESTO_MODE=, CMake) trade SRAM, tearing and core1 time:
+//
+//   palette  (PICODOOM_PRESTO_PALETTE)  St7701Format::Palette8, 480x300 bytes
+//     (144 KB) of colour indices expanded to RGB by the panel PIO's 256-entry
+//     table. Hi-res: screens[0] IS that framebuffer (zero copy, fixed address,
+//     so the "screens[0] never moves" rule holds; the renderer is visible
+//     mid-draw => some tearing). Low-res: screens[0] is a separate 64 KB
+//     buffer, expanded 1.5x into the framebuffer in I_FinishUpdate (~1 ms).
+//     Palette changes are 256 register-width writes; core1 only idles.
+//
+//   scanline (default)  St7701Format::Scanline565, no framebuffer: core1 runs
+//     scanline_task(), whose callback converts one source line per panel line
+//     through the RGB565 LUT just ahead of the beam (~one line time of ~25 us).
+//     Hi-res reads screens[0] directly (tears); low-res reads a 64 KB copy made
+//     at the end of each frame, so only the ~0.2 ms copy can tear.
+//
+// Boot menu: LVGL renders (core0) into an 8-bit RGB332 surface of the same
+// kind (palette mode: the framebuffer; scanline mode: a temporary 144 KB
+// buffer freed in i_video_lcd_set_hires()), so the menu travels the same
+// scanout path as the game -- see lvgl_display_presto.cpp.
+#include "pico_toolset/st7701.h"
+#include "pico_toolset/st7701_configs.h"
+#include "pico_toolset/psram.h"
+#include "board_config.hpp"
+#include "i_frame_stats.hpp"
+
+extern "C" {
+#include "doomdef.h"
+#include "i_video.h"
+#include "i_system.h"
+#include "v_video.h"
+#include "doomstat.h"
+}
+
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <malloc.h>
+#include <unistd.h>
+
+#include "hardware/sync.h"
+#include "pico/multicore.h"
+#include "pico/stdlib.h"
+#include "pico/time.h"
+
+extern "C" char __StackLimit;
+extern "C" char __bss_end__;
+
+namespace {
+
+constexpr int kPanelW = 480;
+constexpr int kVisibleH = 300; // game rows; 300..479 are the black band
+constexpr size_t kSurfaceBytes = static_cast<size_t>(kPanelW) * kVisibleH;
+
+#ifdef PICODOOM_PRESTO_PALETTE
+constexpr pico_toolset::St7701Format kFormat = pico_toolset::St7701Format::Palette8;
+constexpr const char* kModeName = "palette8";
+#else
+constexpr pico_toolset::St7701Format kFormat = pico_toolset::St7701Format::Scanline565;
+constexpr const char* kModeName = "scanline565";
+#endif
+
+pico_toolset::St7701 g_lcd;
+bool g_graphics_init_done = false;
+volatile bool g_core1_ready = false;
+volatile bool g_lcd_ok = false;
+pico_toolset::St7701Config g_cfg;
+
+// 480x300 indexed surface: Palette8 framebuffer / scanline-mode menu surface.
+uint8_t* g_surface = nullptr;
+
+float g_gamma = 1.4f;
+byte g_palette_cache[256 * 3];
+
+// core1 stack: St7701::init() runs on it (SPI init sequence, PIO/DMA setup);
+// the scanout loop afterwards is shallow. Not the 2 KB scratch default.
+constexpr size_t kCore1StackWords = 2048; // 8 KB
+uint32_t g_core1_stack[kCore1StackWords];
+
+#ifndef PICODOOM_PRESTO_PALETTE
+// Scanline mode: what the callback reads. Set from core0 only.
+alignas(4) uint16_t g_lut[256];
+const uint8_t* volatile g_src = nullptr; // nullptr = black
+volatile int g_src_w = kPanelW;
+uint8_t* g_lowres_copy = nullptr; // 320x200 tear-free copy (low-res only)
+// Hi-res: a 480-wide copy of the top rows (everything above the status bar),
+// refreshed once per frame, so the 3D view / menus / HUD sprites -- drawn in
+// stages, sprites last -- never show half-drawn. The full 144 KB copy would not
+// fit next to screens[0]; the status bar below it redraws incrementally, so it
+// is scanned straight from screens[0].
+uint8_t* g_head_copy = nullptr;
+size_t g_head_alloc_rows = 0;
+volatile int g_head_rows = 0; // rows of g_head_copy that are valid
+#endif
+
+struct Rgb8 { uint8_t r, g, b; };
+
+Rgb8 apply_gamma(int i) {
+    byte r = gammatable[usegamma][g_palette_cache[i * 3 + 0]];
+    byte g = gammatable[usegamma][g_palette_cache[i * 3 + 1]];
+    byte b = gammatable[usegamma][g_palette_cache[i * 3 + 2]];
+    if (g_gamma != 1.0f) {
+        const float inv = 1.0f / g_gamma;
+        r = static_cast<byte>(255.0f * powf(r / 255.0f, inv) + 0.5f);
+        g = static_cast<byte>(255.0f * powf(g / 255.0f, inv) + 0.5f);
+        b = static_cast<byte>(255.0f * powf(b / 255.0f, inv) + 0.5f);
+    }
+    return {r, g, b};
+}
+
+void set_entry(int i, uint8_t r, uint8_t g, uint8_t b) {
+#ifdef PICODOOM_PRESTO_PALETTE
+    g_lcd.set_palette_colour(static_cast<uint8_t>(i), r, g, b);
+#else
+    const uint16_t rgb565 = static_cast<uint16_t>(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+    g_lut[i] = pico_toolset::st7701_encode(rgb565);
+#endif
+}
+
+void rebuild_game_palette() {
+    for (int i = 0; i < 256; ++i) {
+        const Rgb8 c = apply_gamma(i);
+        set_entry(i, c.r, c.g, c.b);
+    }
+}
+
+// RGB332 colour cube the LVGL menu surface is quantised to (see
+// lvgl_display_presto.cpp's flush).
+void set_menu_palette() {
+    for (int i = 0; i < 256; ++i) {
+        const uint8_t r = static_cast<uint8_t>(((i >> 5) & 7) * 255 / 7);
+        const uint8_t g = static_cast<uint8_t>(((i >> 2) & 7) * 255 / 7);
+        const uint8_t b = static_cast<uint8_t>((i & 3) * 255 / 3);
+        set_entry(i, r, g, b);
+    }
+}
+
+#ifndef PICODOOM_PRESTO_PALETTE
+// Renders panel line y (0..299) from the 8-bit source through the LUT.
+// Runs on core1 in thread context under a ~one-line-time deadline: RAM code,
+// SRAM data only, word-wide moves.
+void __not_in_flash_func(line_callback)(int y, uint16_t* line, void*) {
+    const uint8_t* src = g_src;
+    uint32_t* d = reinterpret_cast<uint32_t*>(line);
+    if (!src) {
+        for (int i = 0; i < kPanelW / 2; ++i)
+            d[i] = 0;
+        return;
+    }
+    const uint16_t* lut = g_lut;
+    if (g_src_w == kPanelW) {
+        const uint8_t* row = y < g_head_rows ? g_head_copy + y * kPanelW : src + y * kPanelW;
+        const uint32_t* s = reinterpret_cast<const uint32_t*>(row);
+        for (int i = 0; i < kPanelW / 4; ++i) {
+            const uint32_t w = s[i];
+            d[2 * i]     = lut[w & 0xFF] | (static_cast<uint32_t>(lut[(w >> 8) & 0xFF]) << 16);
+            d[2 * i + 1] = lut[(w >> 16) & 0xFF] | (static_cast<uint32_t>(lut[w >> 24]) << 16);
+        }
+    } else {
+        // 320 -> 480: source pixels (a b c d) become (a a b c c d).
+        const uint32_t* s = reinterpret_cast<const uint32_t*>(src + (y * 2 / 3) * 320);
+        for (int i = 0; i < 320 / 4; ++i) {
+            const uint32_t w = s[i];
+            const uint32_t a = lut[w & 0xFF], b = lut[(w >> 8) & 0xFF];
+            const uint32_t c = lut[(w >> 16) & 0xFF], e = lut[w >> 24];
+            d[3 * i]     = a | (a << 16);
+            d[3 * i + 1] = b | (c << 16);
+            d[3 * i + 2] = c | (e << 16);
+        }
+    }
+}
+#endif
+
+void __not_in_flash_func(core1_entry)() {
+    g_lcd_ok = g_lcd.init(g_cfg);
+    if (g_lcd_ok)
+        g_lcd.set_backlight(255);
+    g_core1_ready = true;
+    // Everything from here runs from RAM only: Bluetooth bonding erases/
+    // programs flash from core0 while this loop (and the scanout IRQs) keep
+    // running -- see PICO_FLASH_ASSUME_CORE1_SAFE in CMakeLists.txt.
+    while (true) {
+#ifndef PICODOOM_PRESTO_PALETTE
+        g_lcd.scanline_task();
+#else
+        __wfe();
+#endif
+    }
+}
+
+#ifndef PICODOOM_PRESTO_PALETTE
+// Hi-res scanline: allocates the top-rows copy once the engine is up (first level
+// frame). It must come AFTER screens[0]: the freed 144 KB menu surface is exactly the
+// hole screens[0] needs, and taking part of it first fragments the heap (observed:
+// "V_Init: allocate screens -> Out of memory"). Sized from the contiguous space above
+// the heap break so it cannot starve the engine's later SRAM allocations either.
+bool g_head_tried = false;
+void try_alloc_head_copy();
+#endif
+
+size_t sram_free_estimate() {
+    struct mallinfo mi = mallinfo();
+    const size_t total = static_cast<size_t>(&__StackLimit - &__bss_end__);
+    const size_t used = static_cast<size_t>(mi.uordblks);
+    return total > used ? total - used : 0;
+}
+
+#ifndef PICODOOM_PRESTO_PALETTE
+void try_alloc_head_copy() {
+    g_head_tried = true;
+    constexpr size_t kReserve = 8 * 1024; // slack: R_Init has already run by the first level frame
+    const size_t top = static_cast<size_t>(&__StackLimit - static_cast<char*>(sbrk(0)));
+    size_t rows = SCREENHEIGHT - 48; // everything above the status bar (32 * 1.5)
+    rows = top > kReserve ? std::min<size_t>(rows, (top - kReserve) / kPanelW) : 0;
+    if (rows) {
+        g_head_copy = static_cast<uint8_t*>(malloc(rows * kPanelW));
+        g_head_alloc_rows = g_head_copy ? rows : 0;
+    }
+    printf("PicoDoom: hi-res scanline: tear-free copy of the top %u rows\n", static_cast<unsigned>(g_head_alloc_rows));
+}
+#endif
+
+bool in_sram(const void* p) {
+    const uintptr_t a = reinterpret_cast<uintptr_t>(p);
+    return a >= 0x20000000u && a < 0x20082000u;
+}
+
+// ---- stats ----------------------------------------------------------------
+uint64_t g_last_frame_start_us = 0;
+uint64_t g_stats_window_start_us = 0;
+uint32_t g_frames_in_window = 0;
+uint64_t g_frame_us_in_window = 0;
+uint64_t g_copy_us_in_window = 0;
+uint32_t g_prev_late = 0, g_prev_missed = 0;
+
+void report_stats_if_due(uint64_t now_us) {
+    constexpr uint64_t kIntervalUs = 10'000'000;
+    if (g_stats_window_start_us == 0) {
+        g_stats_window_start_us = now_us;
+        return;
+    }
+    const uint64_t elapsed_us = now_us - g_stats_window_start_us;
+    if (elapsed_us < kIntervalUs)
+        return;
+
+    const float fps = static_cast<float>(g_frames_in_window) * 1'000'000.0f / static_cast<float>(elapsed_us);
+    const float copy_pct = g_frame_us_in_window
+        ? 100.0f * static_cast<float>(g_copy_us_in_window) / static_cast<float>(g_frame_us_in_window) : 0.0f;
+
+    struct mallinfo mi = mallinfo();
+    const size_t sram_total = static_cast<size_t>(&__StackLimit - &__bss_end__);
+    const size_t sram_used = static_cast<size_t>(mi.uordblks);
+    const size_t psram_used = pico_toolset::psram_used_bytes();
+    const size_t psram_total = pico_toolset::psram_status().size_bytes;
+
+    float tic_pct = 0, render3d_pct = 0, draw2d_pct = 0, bsp_walls_pct = 0, planes_pct = 0, sprites_pct = 0;
+    i_frame_stats_take(elapsed_us, &tic_pct, &render3d_pct, &draw2d_pct,
+                        &bsp_walls_pct, &planes_pct, &sprites_pct);
+    const uint32_t wad_cache_misses = i_frame_stats_take_wad_cache_misses();
+
+    uint32_t late = 0, missed = 0;
+#ifndef PICODOOM_PRESTO_PALETTE
+    late = g_lcd.late_lines();
+    missed = g_lcd.missed_frames();
+#endif
+    printf("PicoDoom: SRAM %u/%uKB  PSRAM %u/%uKB  FPS %.1f  present %.0f%%  "
+           "late-lines %u  missed-frames %u (per 10s)  "
+           "tic %.0f%%  render3d %.0f%% (bsp+walls %.0f%%  planes %.0f%%  sprites %.0f%%)  draw2d %.0f%%  "
+           "wad-cache-miss %u/10s\n",
+           static_cast<unsigned>(sram_used / 1024), static_cast<unsigned>(sram_total / 1024),
+           static_cast<unsigned>(psram_used / 1024), static_cast<unsigned>(psram_total / 1024),
+           fps, copy_pct,
+           static_cast<unsigned>(late - g_prev_late), static_cast<unsigned>(missed - g_prev_missed),
+           tic_pct, render3d_pct, bsp_walls_pct, planes_pct, sprites_pct, draw2d_pct,
+           static_cast<unsigned>(wad_cache_misses));
+    g_prev_late = late;
+    g_prev_missed = missed;
+
+    g_stats_window_start_us = now_us;
+    g_frames_in_window = 0;
+    g_frame_us_in_window = 0;
+    g_copy_us_in_window = 0;
+}
+
+#ifdef PICODOOM_PRESTO_PALETTE
+// Expands one 320-px source row into 480 px (a b c d e f g h -> a a b c c d e e f g g h).
+void expand_row(uint8_t* dst, const uint8_t* src) {
+    const uint32_t* s = reinterpret_cast<const uint32_t*>(src);
+    uint32_t* d = reinterpret_cast<uint32_t*>(dst);
+    for (int i = 0; i < 320 / 8; ++i) {
+        const uint32_t w0 = s[2 * i], w1 = s[2 * i + 1];
+        const uint32_t a = w0 & 0xFF, b = (w0 >> 8) & 0xFF, c = (w0 >> 16) & 0xFF, e = w0 >> 24;
+        const uint32_t f = w1 & 0xFF, g = (w1 >> 8) & 0xFF, h = (w1 >> 16) & 0xFF, k = w1 >> 24;
+        // output bytes: a a b c | c e f f | g h h k  (pairs (a,b),(c,e),(f,g),(h,k))
+        d[3 * i]     = a | (a << 8) | (b << 16) | (c << 24);
+        d[3 * i + 1] = c | (e << 8) | (f << 16) | (f << 24);
+        d[3 * i + 2] = g | (h << 8) | (h << 16) | (k << 24);
+    }
+}
+#endif
+
+} // namespace
+
+extern "C" {
+
+void I_InitGraphics(void) {
+    if (g_graphics_init_done)
+        return;
+    g_graphics_init_done = true;
+
+    if (sram_free_estimate() < kSurfaceBytes)
+        I_Error(const_cast<char*>("I_InitGraphics: no SRAM for the 480x300 surface"));
+    g_surface = static_cast<uint8_t*>(malloc(kSurfaceBytes));
+    if (!g_surface)
+        I_Error(const_cast<char*>("I_InitGraphics: surface allocation failed"));
+    memset(g_surface, 0, kSurfaceBytes);
+
+    g_cfg = pico_toolset::configs::st7701::kPimoroniPrestoFullRes;
+    g_cfg.format = kFormat;
+    g_cfg.visible_height = kVisibleH;
+#ifdef PICODOOM_PRESTO_PALETTE
+    g_cfg.framebuffer = g_surface;
+#else
+    g_cfg.line_callback = line_callback;
+#endif
+
+    set_menu_palette();
+#ifndef PICODOOM_PRESTO_PALETTE
+    g_src_w = kPanelW;
+    g_src = g_surface;
+#endif
+
+    multicore_reset_core1();
+    multicore_launch_core1_with_stack(core1_entry, g_core1_stack, sizeof(g_core1_stack));
+    const absolute_time_t timeout = make_timeout_time_ms(3000);
+    while (!g_core1_ready && !time_reached(timeout))
+        tight_loop_contents();
+    if (!g_lcd_ok)
+        printf("PicoDoom: ST7701 init FAILED (no free PIO state machine / DMA channel?)\n");
+    else
+        printf("PicoDoom: ST7701 480x480 up, mode %s, game area 480x%d, surface %u KB, gamma %.2f\n",
+               kModeName, kVisibleH, static_cast<unsigned>(kSurfaceBytes / 1024), g_gamma);
+}
+
+// Called once after the boot menu, before D_DoomMain().
+void i_video_lcd_set_hires(int hires) {
+    g_screenwidth = hires ? 480 : 320;
+    g_screenheight = hires ? 300 : 200;
+
+#ifdef PICODOOM_PRESTO_PALETTE
+    memset(g_surface, 0, kSurfaceBytes); // index 0 is black in the menu palette
+#else
+    // Stop scanning the menu surface, give the callback a frame to leave it,
+    // then hand its 144 KB back to the heap for screens[0] (and the low-res copy).
+    g_src = nullptr;
+    __dmb();
+    sleep_ms(50);
+    free(g_surface);
+    g_surface = nullptr;
+    if (!hires) {
+        const size_t bytes = 320 * 200;
+        g_lowres_copy = static_cast<uint8_t*>(sram_free_estimate() >= bytes ? malloc(bytes) : nullptr);
+        if (!g_lowres_copy)
+            I_Error(const_cast<char*>("i_video_lcd_set_hires: no SRAM for the low-res display copy"));
+        memset(g_lowres_copy, 0, bytes);
+    }
+    g_head_rows = 0;
+    g_src_w = SCREENWIDTH;
+#endif
+    __dmb();
+    printf("PicoDoom: game frame %dx%d (%s)\n", SCREENWIDTH, SCREENHEIGHT, hires ? "high res" : "low res");
+}
+
+// doom/v_video.c V_Init() hook: Palette8 hi-res plays straight into the framebuffer.
+byte* i_video_presto_screen0(size_t size) {
+#ifdef PICODOOM_PRESTO_PALETTE
+    if (SCREENWIDTH == kPanelW && size == kSurfaceBytes)
+        return g_surface;
+#else
+    (void)size;
+#endif
+    return nullptr;
+}
+
+// LVGL menu surface (480x300 RGB332 indices, stride 480).
+uint8_t* i_video_presto_menu_surface(void) {
+    return g_surface;
+}
+
+void I_ShutdownGraphics(void) {}
+
+void I_SetPalette(byte* palette) {
+    memcpy(g_palette_cache, palette, sizeof(g_palette_cache));
+    rebuild_game_palette();
+}
+
+void I_UpdateNoBlit(void) {}
+
+void I_FinishUpdate(void) {
+    const uint64_t frame_start_us = time_us_64();
+    if (g_last_frame_start_us != 0)
+        g_frame_us_in_window += frame_start_us - g_last_frame_start_us;
+    g_last_frame_start_us = frame_start_us;
+
+#ifdef PICODOOM_PRESTO_PALETTE
+    if (SCREENWIDTH != kPanelW) {
+        // 320x200 -> 480x300 into the framebuffer: source rows 2k -> panel rows 3k, 3k+1; 2k+1 -> 3k+2.
+        const byte* src = screens[0];
+        for (int k = 0; k < 100; ++k) {
+            uint8_t* d = g_surface + (3 * k) * kPanelW;
+            expand_row(d, src + (2 * k) * 320);
+            memcpy(d + kPanelW, d, kPanelW);
+            expand_row(d + 2 * kPanelW, src + (2 * k + 1) * 320);
+        }
+    }
+#else
+    if (SCREENWIDTH != kPanelW) {
+        memcpy(g_lowres_copy, screens[0], 320 * 200);
+        if (g_src != g_lowres_copy) {
+            __dmb();
+            g_src = g_lowres_copy;
+        }
+    } else {
+        if (!g_head_tried && gamestate == GS_LEVEL)
+            try_alloc_head_copy();
+        if (g_head_alloc_rows) {
+            memcpy(g_head_copy, screens[0], g_head_alloc_rows * kPanelW);
+            g_head_rows = static_cast<int>(g_head_alloc_rows);
+        }
+        if (g_src != screens[0]) {
+            if (!in_sram(screens[0]))
+                printf("PicoDoom: WARNING screens[0] is not in SRAM -- scanline565 hi-res cannot scan it\n");
+            __dmb();
+            g_src = screens[0];
+        }
+    }
+#endif
+    const uint64_t now_us = time_us_64();
+    g_copy_us_in_window += now_us - frame_start_us;
+    ++g_frames_in_window;
+    report_stats_if_due(now_us);
+}
+
+void I_ReadScreen(byte* scr) {
+    memcpy(scr, screens[0], SCREENWIDTH * SCREENHEIGHT);
+}
+
+// The ST7701 dot clock is fixed at init (St7701Config::max_pixel_clock_hz);
+// stubs keep the serial console's non-HDMI `pclk` command linkable.
+uint32_t i_video_pixel_clock_hz(void) {
+    return 0;
+}
+
+void i_video_set_pixel_clock_hz(uint32_t) {
+    printf("PicoDoom: pixel clock is not adjustable on the Presto build\n");
+}
+
+float i_video_gamma(void) {
+    return g_gamma;
+}
+
+void i_video_set_gamma(float gamma) {
+    constexpr float kMinGamma = 0.1f;
+    constexpr float kMaxGamma = 10.0f;
+    g_gamma = gamma;
+    if (g_gamma < kMinGamma)
+        g_gamma = kMinGamma;
+    else if (g_gamma > kMaxGamma)
+        g_gamma = kMaxGamma;
+    rebuild_game_palette();
+    printf("PicoDoom: gamma %.2f\n", g_gamma);
+}
+
+void I_StartFrame(void) {}
+
+} // extern "C"
