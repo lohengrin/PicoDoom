@@ -139,7 +139,11 @@ void A_SpawnFly();
 void A_BrainExplode();
 
 
+#ifdef PICODOOM_PRESTO
+static const state_t states_init[NUMSTATES] = {
+#else
 state_t	states[NUMSTATES] = {
+#endif
     {SPR_TROO,0,-1,{NULL},S_NULL,0,0},	// S_NULL
     {SPR_SHTG,4,0,{A_Light0},S_NULL,0,0},	// S_LIGHTDONE
     {SPR_PUNG,0,1,{A_WeaponReady},S_PUNCH,0,0},	// S_PUNCH
@@ -1110,7 +1114,11 @@ state_t	states[NUMSTATES] = {
 };
 
 
+#ifdef PICODOOM_PRESTO
+static const mobjinfo_t mobjinfo_init[NUMMOBJTYPES] = {
+#else
 mobjinfo_t mobjinfo[NUMMOBJTYPES] = {
+#endif
 
     {		// MT_PLAYER
 	-1,		// doomednum
@@ -4675,3 +4683,23 @@ mobjinfo_t mobjinfo[NUMMOBJTYPES] = {
     }
 };
 
+#ifdef PICODOOM_PRESTO
+/* states[] and mobjinfo[] are written at runtime only by G_Fast parms (nightmare / -fast), so
+   they cannot live in flash, but they are read rarely enough to live in PSRAM instead of the
+   40 KB of SRAM they would take as initialised data. The const images above stay in flash and
+   are copied once, from main() after PSRAM init and before the engine starts. */
+#include <string.h>
+extern void *psram_malloc (size_t);
+state_t*	states;
+mobjinfo_t*	mobjinfo;
+
+void I_RelocateInfoTables (void)
+{
+    states = (state_t *) psram_malloc (sizeof(states_init));
+    mobjinfo = (mobjinfo_t *) psram_malloc (sizeof(mobjinfo_init));
+    if (!states || !mobjinfo)
+	I_Error ("I_RelocateInfoTables: out of PSRAM");
+    memcpy (states, states_init, sizeof(states_init));
+    memcpy (mobjinfo, mobjinfo_init, sizeof(mobjinfo_init));
+}
+#endif

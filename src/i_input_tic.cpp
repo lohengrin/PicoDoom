@@ -185,8 +185,15 @@ extern "C" void i_input_reset_menu_input(void)
     g_prev_connected = hid.connected_keyboard_count() > 0;
 }
 
+#ifdef PICODOOM_PRESTO
+extern "C" void presto_video_poll(void); // src/i_video_presto.cpp
+#endif
+
 extern "C" void I_StartTic(void)
 {
+#ifdef PICODOOM_PRESTO
+    presto_video_poll(); // finishes a pending beam-synchronised frame copy (engine idle time)
+#endif
     // Pico-specific runtime tuning (serial console, src/i_serial_console.cpp)
     // -- the F1/F2/F3/F4/F10/F11/F12 intercepts that used to do this are
     // gone; poll their replacement here, once per tic.

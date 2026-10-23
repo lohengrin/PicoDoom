@@ -78,6 +78,9 @@ pico_toolset::St7701Config g_cfg;
 
 // 480x300 indexed surface: Palette8 framebuffer / scanline-mode menu surface.
 uint8_t* g_surface = nullptr;
+#ifdef PICODOOM_PRESTO_PALETTE
+bool g_double_buffer = false; // hi-res: screens[0] is separate from the framebuffer
+#endif
 
 float g_gamma = 1.4f;
 byte g_palette_cache[256 * 3];
@@ -210,6 +213,18 @@ bool g_head_tried = false;
 void try_alloc_head_copy();
 #endif
 
+uint64_t g_sync_wait_us_in_window = 0; // time spent waiting for the beam to reach the blank band
+
+// Waits until the beam is in the black band below the game area (panel rows >= kVisibleH, including
+// the porches), where nothing is read from the display buffer: a top-to-bottom copy started there
+// stays ahead of the next frame's beam, so it never shows a seam. Bounded, in case scanout is down.
+void wait_for_blank_band() {
+    const uint64_t t0 = time_us_64();
+    while (g_lcd.display_row() < kVisibleH && time_us_64() - t0 < 20'000)
+        tight_loop_contents();
+    g_sync_wait_us_in_window += time_us_64() - t0;
+}
+
 size_t sram_free_estimate() {
     struct mallinfo mi = mallinfo();
     const size_t total = static_cast<size_t>(&__StackLimit - &__bss_end__);
@@ -222,7 +237,7 @@ void try_alloc_head_copy() {
     g_head_tried = true;
     constexpr size_t kReserve = 6 * 1024; // slack: R_Init has already run by the first level frame
     const size_t top = static_cast<size_t>(&__StackLimit - static_cast<char*>(sbrk(0)));
-    size_t rows = SCREENHEIGHT - 48; // everything above the status bar (32 * 1.5)
+    size_t rows = SCREENHEIGHT; // the whole frame if it fits, else the 3D view (everything above the status bar)
     rows = top > kReserve ? std::min<size_t>(rows, (top - kReserve) / kPanelW) : 0;
     if (rows) {
         g_head_copy = static_cast<uint8_t*>(malloc(rows * kPanelW));
@@ -230,7 +245,13 @@ void try_alloc_head_copy() {
     }
     // Anchor the copy at the BOTTOM of the 3D view: the weapon, menu text and most sprites that
     // flicker are drawn last and low; the rows left out at the top are mostly ceiling/sky/walls.
-    g_head_start = static_cast<int>(std::max<size_t>(0, (SCREENHEIGHT - 48) - g_head_alloc_rows));
+    if (g_head_alloc_rows >= static_cast<size_t>(SCREENHEIGHT))
+        g_head_start = 0; // whole frame: nothing is scanned from the live buffer any more
+    else {
+        if (g_head_alloc_rows > static_cast<size_t>(SCREENHEIGHT - 48))
+            g_head_alloc_rows = SCREENHEIGHT - 48; // (free() not needed: just copy fewer rows)
+        g_head_start = static_cast<int>((SCREENHEIGHT - 48) - g_head_alloc_rows);
+    }
     printf("PicoDoom: hi-res scanline: tear-free copy of %u rows ending at the status bar (from row %d)\n", static_cast<unsigned>(g_head_alloc_rows), g_head_start);
 }
 #endif
@@ -260,7 +281,9 @@ void report_stats_if_due(uint64_t now_us) {
 
     const float fps = static_cast<float>(g_frames_in_window) * 1'000'000.0f / static_cast<float>(elapsed_us);
     const float copy_pct = g_frame_us_in_window
-        ? 100.0f * static_cast<float>(g_copy_us_in_window) / static_cast<float>(g_frame_us_in_window) : 0.0f;
+        ? 100.0f * static_cast<float>(g_copy_us_in_window - g_sync_wait_us_in_window) / static_cast<float>(g_frame_us_in_window) : 0.0f;
+    const float sync_pct = g_frame_us_in_window
+        ? 100.0f * static_cast<float>(g_sync_wait_us_in_window) / static_cast<float>(g_frame_us_in_window) : 0.0f;
 
     struct mallinfo mi = mallinfo();
     const size_t sram_total = static_cast<size_t>(&__StackLimit - &__bss_end__);
@@ -278,13 +301,13 @@ void report_stats_if_due(uint64_t now_us) {
     late = g_lcd.late_lines();
     missed = g_lcd.missed_frames();
 #endif
-    printf("PicoDoom: SRAM %u/%uKB  PSRAM %u/%uKB  FPS %.1f  present %.0f%%  "
+    printf("PicoDoom: SRAM %u/%uKB  PSRAM %u/%uKB  FPS %.1f  present %.0f%%  beam-sync-wait %.0f%%  "
            "late-lines %u  missed-frames %u (per 10s)  "
            "tic %.0f%%  render3d %.0f%% (bsp+walls %.0f%%  planes %.0f%%  sprites %.0f%%)  draw2d %.0f%%  "
            "wad-cache-miss %u/10s\n",
            static_cast<unsigned>(sram_used / 1024), static_cast<unsigned>(sram_total / 1024),
            static_cast<unsigned>(psram_used / 1024), static_cast<unsigned>(psram_total / 1024),
-           fps, copy_pct,
+           fps, copy_pct, sync_pct,
            static_cast<unsigned>(late - g_prev_late), static_cast<unsigned>(missed - g_prev_missed),
            tic_pct, render3d_pct, bsp_walls_pct, planes_pct, sprites_pct, draw2d_pct,
            static_cast<unsigned>(wad_cache_misses));
@@ -295,6 +318,7 @@ void report_stats_if_due(uint64_t now_us) {
     g_frames_in_window = 0;
     g_frame_us_in_window = 0;
     g_copy_us_in_window = 0;
+    g_sync_wait_us_in_window = 0;
 }
 
 #ifdef PICODOOM_PRESTO_PALETTE
@@ -364,6 +388,14 @@ void i_video_lcd_set_hires(int hires) {
 
 #ifdef PICODOOM_PRESTO_PALETTE
     memset(g_surface, 0, kSurfaceBytes); // index 0 is black in the menu palette
+    // Hi-res: give the renderer its own screens[0] and copy it into the framebuffer once per
+    // frame (tear-free apart from the ~0.3 ms copy), if the heap can hold a second 144 KB.
+    // Otherwise screens[0] stays the framebuffer itself (zero copy, tears: see i_video_presto_screen0).
+    g_double_buffer = hires && sram_free_estimate() >= kSurfaceBytes + 16 * 1024;
+    if (hires)
+        printf("PicoDoom: palette hi-res: %s\n", g_double_buffer
+               ? "separate render buffer, copied to the framebuffer each frame (tear-free)"
+               : "SRAM short, rendering straight into the framebuffer (tears)");
 #else
     // Stop scanning the menu surface, give the callback a frame to leave it,
     // then hand its 144 KB back to the heap for screens[0] (and the low-res copy).
@@ -389,7 +421,7 @@ void i_video_lcd_set_hires(int hires) {
 // doom/v_video.c V_Init() hook: Palette8 hi-res plays straight into the framebuffer.
 byte* i_video_presto_screen0(size_t size) {
 #ifdef PICODOOM_PRESTO_PALETTE
-    if (SCREENWIDTH == kPanelW && size == kSurfaceBytes)
+    if (SCREENWIDTH == kPanelW && size == kSurfaceBytes && !g_double_buffer)
         return g_surface;
 #else
     (void)size;
@@ -411,14 +443,25 @@ void I_SetPalette(byte* palette) {
 
 void I_UpdateNoBlit(void) {}
 
-void I_FinishUpdate(void) {
-    const uint64_t frame_start_us = time_us_64();
-    if (g_last_frame_start_us != 0)
-        g_frame_us_in_window += frame_start_us - g_last_frame_start_us;
-    g_last_frame_start_us = frame_start_us;
+} // extern "C"
 
+namespace {
+
+// The per-frame copy into what the panel scans (see the header comment). Done once the beam is
+// in the blank band, never mid-picture: I_FinishUpdate() only *requests* it, and the engine's
+// idle time between frames (I_StartTic() is polled in a tight loop while it waits for the next
+// tic) performs it as soon as the beam gets there; presto_video_flush(), called at the top of
+// D_Display() (the only place that draws), blocks if it still has not happened -- the old
+// unconditional wait, now rarely reached. screens[0] is stable until then: nothing draws
+// between I_FinishUpdate() and the next D_Display().
+bool g_copy_pending = false;
+
+void do_copy() {
+    const uint64_t t0 = time_us_64();
 #ifdef PICODOOM_PRESTO_PALETTE
-    if (SCREENWIDTH != kPanelW) {
+    if (g_double_buffer) {
+        memcpy(g_surface, screens[0], kSurfaceBytes);
+    } else if (SCREENWIDTH != kPanelW) {
         // 320x200 -> 480x300 into the framebuffer: source rows 2k -> panel rows 3k, 3k+1; 2k+1 -> 3k+2.
         const byte* src = screens[0];
         for (int k = 0; k < 100; ++k) {
@@ -450,10 +493,51 @@ void I_FinishUpdate(void) {
         }
     }
 #endif
-    const uint64_t now_us = time_us_64();
-    g_copy_us_in_window += now_us - frame_start_us;
+    g_copy_us_in_window += time_us_64() - t0;
+}
+
+bool copy_needed() {
+#ifdef PICODOOM_PRESTO_PALETTE
+    return g_double_buffer || SCREENWIDTH != kPanelW;
+#else
+    return true;
+#endif
+}
+
+} // namespace
+
+extern "C" {
+
+// Non-blocking: performs the pending copy if the beam is in the blank band right now.
+void presto_video_poll(void) {
+    if (g_copy_pending && g_lcd.display_row() >= kVisibleH) {
+        do_copy();
+        g_copy_pending = false;
+    }
+}
+
+// Blocking: the copy must be done before anything draws into screens[0] again.
+void presto_video_flush(void) {
+    if (!g_copy_pending)
+        return;
+    wait_for_blank_band();
+    do_copy();
+    g_copy_pending = false;
+}
+
+void I_FinishUpdate(void) {
+    const uint64_t frame_start_us = time_us_64();
+    if (g_last_frame_start_us != 0)
+        g_frame_us_in_window += frame_start_us - g_last_frame_start_us;
+    g_last_frame_start_us = frame_start_us;
+
+    presto_video_flush(); // a previous request nobody completed (init screens, wipes)
+    if (copy_needed()) {
+        g_copy_pending = true;
+        presto_video_poll();
+    }
     ++g_frames_in_window;
-    report_stats_if_due(now_us);
+    report_stats_if_due(frame_start_us);
 }
 
 void I_ReadScreen(byte* scr) {

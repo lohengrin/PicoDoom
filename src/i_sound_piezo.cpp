@@ -50,7 +50,8 @@ extern "C" {
 #ifdef PICODOOM_A2DP
 bool presto_a2dp_streaming();
 bool presto_a2dp_take_stream_started(); // true once per transition to Streaming
-void presto_a2dp_pump(bool music);
+void presto_a2dp_set_enabled(bool on);
+void presto_a2dp_set_music_volume(int volume);
 bool presto_pcm_start(int handle, const uint8_t* data, uint32_t length, uint32_t rate, int vol, int pitch);
 void presto_pcm_stop(int handle);
 bool presto_pcm_playing(int handle);
@@ -59,7 +60,8 @@ void presto_pcm_flush();
 #else
 inline bool presto_a2dp_streaming() { return false; }
 inline bool presto_a2dp_take_stream_started() { return false; }
-inline void presto_a2dp_pump(bool) {}
+inline void presto_a2dp_set_enabled(bool) {}
+inline void presto_a2dp_set_music_volume(int) {}
 inline bool presto_pcm_start(int, const uint8_t*, uint32_t, uint32_t, int, int) { return false; }
 inline void presto_pcm_stop(int) {}
 inline bool presto_pcm_playing(int) { return false; }
@@ -68,6 +70,13 @@ inline void presto_pcm_flush() {}
 #endif
 
 namespace {
+
+// The MUS sequencer is shared with the Bluetooth context (presto_a2dp.cpp renders it from the
+// A2DP source callback while streaming), so every mus_* call from the game thread is atomic.
+struct IrqLock {
+    uint32_t flags = save_and_disable_interrupts();
+    ~IrqLock() { restore_interrupts(flags); }
+};
 
 constexpr int kWindowMs = 25;
 constexpr int kMaxWindows = 80;      // 2 s of contour per sound
@@ -237,10 +246,14 @@ void play_music(uint64_t now_us) {
     uint32_t ticks = static_cast<uint32_t>(elapsed * kMusicTickHz / 1'000'000);
     g_music_tick_rem = static_cast<uint32_t>(elapsed - static_cast<uint64_t>(ticks) * 1'000'000 / kMusicTickHz);
     ticks = std::min<uint32_t>(ticks, 30);
-    mus_step(static_cast<int>(ticks));
-
     float hz = 0.0f, level = 0.0f;
-    if (g_music_volume > 0 && mus_lead(&hz, &level)) {
+    bool lead;
+    {
+        IrqLock lock;
+        mus_step(static_cast<int>(ticks));
+        lead = g_music_volume > 0 && mus_lead(&hz, &level);
+    }
+    if (lead) {
         while (hz < 200.0f)
             hz *= 2.0f; // fold bass into the piezo's audible range
         while (hz > kMaxHz)
@@ -270,6 +283,7 @@ void I_SubmitSound(void) {
         const bool pressed = read_bootsel();
         if (pressed && !g_prev_bootsel) {
             g_muted = !g_muted;
+            presto_a2dp_set_enabled(!g_muted);
             printf("PicoDoom: sound %s (BOOTSEL)\n", g_muted ? "muted" : "on");
             if (g_muted) {
                 g_sfx.active = false;
@@ -282,6 +296,7 @@ void I_SubmitSound(void) {
     }
     if (presto_a2dp_take_stream_started() && g_muted) {
         g_muted = false; // connecting a headset is a deliberate "I want sound"; BOOTSEL mutes again
+        presto_a2dp_set_enabled(true);
         printf("PicoDoom: sound on (headset streaming; BOOTSEL toggles)\n");
     }
     if (g_muted)
@@ -290,8 +305,7 @@ void I_SubmitSound(void) {
         g_sfx.active = false;
         g_music_last_us = 0;
         set_silent();
-        presto_a2dp_pump(mus_is_playing() && g_music_volume > 0);
-        return;
+        return; // the Bluetooth context mixes on demand (presto_a2dp.cpp)
     }
     if (g_sfx.active) {
         if (play_sfx(now_us))
@@ -299,7 +313,12 @@ void I_SubmitSound(void) {
         g_sfx.active = false;
         set_silent();
     }
-    if (mus_is_playing())
+    bool playing;
+    {
+        IrqLock lock;
+        playing = mus_is_playing();
+    }
+    if (playing)
         play_music(now_us);
     else
         set_silent();
@@ -368,13 +387,13 @@ void I_UpdateSoundParams(int handle, int vol, int sep, int pitch) {
 }
 
 void I_InitMusic(void) {}
-void I_ShutdownMusic(void) { mus_stop(); }
-void I_SetMusicVolume(int volume) { g_music_volume = volume; mus_set_volume(volume); }
-void I_PauseSong(int handle) { (void)handle; mus_pause(); }
-void I_ResumeSong(int handle) { (void)handle; mus_resume(); }
+void I_ShutdownMusic(void) { IrqLock l; mus_stop(); }
+void I_SetMusicVolume(int volume) { g_music_volume = volume; presto_a2dp_set_music_volume(volume); IrqLock l; mus_set_volume(volume); }
+void I_PauseSong(int handle) { (void)handle; IrqLock l; mus_pause(); }
+void I_ResumeSong(int handle) { (void)handle; IrqLock l; mus_resume(); }
 int I_RegisterSong(void* data) { g_song = data; return 1; }
-void I_PlaySong(int handle, int looping) { (void)handle; mus_start(g_song, looping != 0); }
-void I_StopSong(int handle) { (void)handle; mus_stop(); }
+void I_PlaySong(int handle, int looping) { (void)handle; IrqLock l; mus_start(g_song, looping != 0); }
+void I_StopSong(int handle) { (void)handle; IrqLock l; mus_stop(); }
 void I_UnRegisterSong(int handle) { (void)handle; g_song = nullptr; }
 
 } // extern "C"

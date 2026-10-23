@@ -45,10 +45,9 @@ PSRAM, uSD (SPI0), piezo GPIO43, QW/ST I2C0 (QwSTPad 0x21), CYW43 radio used for
   - `scanline` (default): `Scanline565`, no framebuffer; core1 runs `scanline_task()` and the RAM
     callback converts one source line per panel line through the 256-entry RGB565 LUT. Low-res reads
     a 64 KB copy of `screens[0]` taken in `I_FinishUpdate` (tears only during the ~0.2 ms copy);
-    hi-res scans a copy of the top rows (everything above the status bar, as many as SRAM allows -- ~235-252) made each frame, and the status bar straight from `screens[0]` (a full 144 KB copy does not fit). Watch `late-lines`/`missed-frames` in the stats line.
+    hi-res scans a full 480x300 copy of `screens[0]` made each frame (allocated at the first level frame, after `screens[0]`, from the contiguous heap top; if SRAM is ever short it falls back to the bottom-anchored 3D-view rows and scans the rest live). That copy needs the 40 KB freed by relocating `states[]`/`mobjinfo[]` to PSRAM (`PICODOOM_PRESTO` in `doom/info.c`, `I_RelocateInfoTables()` called from `main()`; they are written only by G_Fast parms). Watch `late-lines`/`missed-frames` in the stats line.
   - `palette`: `Palette8`, 480x300 byte framebuffer (144 KB) + the panel PIO's hardware palette
-    (`I_SetPalette` -> `set_palette_colour`). Hi-res: `screens[0]` *is* the framebuffer (V_Init hook
-    `i_video_presto_screen0`; zero copy => sprites/menus flicker from tearing, use low-res or scanline for a clean picture); low-res expands 1.5x into it per frame. The black band shows palette
+    (`I_SetPalette` -> `set_palette_colour`). Hi-res: with the SRAM freed by the `states[]`/`mobjinfo[]` relocation, `screens[0]` is a separate 144 KB buffer copied into the framebuffer once per frame (tear-free but for the ~0.3 ms copy); only if the heap is too short does it fall back to `screens[0]` *being* the framebuffer (V_Init hook `i_video_presto_screen0`; zero copy, tears); low-res expands 1.5x into it per frame. The black band shows palette
     entry 0, so pain/pickup flashes tint it.
   - A full RGB565 framebuffer (288-450 KB) does not fit next to the engine; not offered.
   - core1 only serves scanout (IRQs + `scanline_task`), all from RAM -- required because Bluetooth
@@ -57,6 +56,7 @@ PSRAM, uSD (SPI0), piezo GPIO43, QW/ST I2C0 (QwSTPad 0x21), CYW43 radio used for
   - The LVGL boot menu renders (core0) into an RGB332 480x300 surface scanned out like the game
     (`lvgl_display_presto.cpp`): the palette-mode framebuffer, or a temporary 144 KB buffer in
     scanline mode that `i_video_lcd_set_hires()` frees before the engine allocates `screens[0]`.
+- **Beam-synchronised copies** (deferred): every per-frame copy (scanline low/hi-res, palette double buffer / 1.5x expand) runs only while `St7701::display_row()` >= 300, i.e. the beam is on the black band/porches where nothing is read from the buffer; a top-to-bottom copy started there stays ahead of the next frame's beam, so there is no seam (~40% of each ~8 ms frame is such a window; refresh = dot clock / 264k, dot clock = clk_sys/even divider, cap 34 MHz). `I_FinishUpdate()` only *requests* the copy; `presto_video_poll()` (called first thing in `I_StartTic()`, which the engine polls in a tight loop while idling for the next tic) performs it when the beam gets there, and `presto_video_flush()` (top of `D_Display()`, the only place that draws; `doom/d_main.c` shim) blocks if it still is not done. Stats field `beam-sync-wait` = time spent in that blocking wait (should now be small).
 - **Input**: `src/hid_source.hpp` (`HidSource`) is the backend-neutral input view; shared event
   posting is `src/i_input_tic.cpp` (`I_StartTic`), backends are `i_input_usbhid.cpp` (PiZero) and
   `i_input_presto.cpp` (Bluetooth HID via `pico_toolset_bluetooth_hid` + QwSTPad D-pad/A/B/X/Y/+/-;
@@ -70,16 +70,19 @@ PSRAM, uSD (SPI0), piezo GPIO43, QW/ST I2C0 (QwSTPad 0x21), CYW43 radio used for
   stepped without synthesis (`mus_step`/`mus_lead` in `mus_player.cpp`), lead voice only, preempted
   by SFX. `doom/s_sound.c` PICO stubs are now gated on `PICODOOM_AUDIO` (hdmi + presto).
 - **Bluetooth audio (A2DP)** (`src/presto_a2dp.cpp`, `-DPICODOOM_PRESTO_A2DP=ON` default): when a headset is
-  *streaming*, `i_sound_piezo.cpp` stops the piezo and routes real audio there: an 8-voice mono mixer for the
-  DMX samples (linear interpolation, `presto_pcm_*`) plus `mus_render()` for music, written into a 4096-sample
-  mono ring that `DoomSource::fill()` (BTstack context, SBC encoder) drains; the game thread tops the ring up to
-  ~2560 samples (~58 ms) from `I_SubmitSound()` (consumption-driven, no clock drift; an empty ring is silence).
-  SBC preset `Mono` (154 kbps) to leave radio time for the pad. The last headset is stored by BTstack and
-  reconnects after boot; the boot menu has Pair/Forget buttons for pad/keyboard and for audio plus a combined
-  status line. BOOTSEL mute applies to both outputs. Costs ~36 KB SRAM (AVDTP/AVRCP pools, 1 KB ACL buffers,
-  `PICO_STACK_SIZE=0x1000`, ring), so the hi-res scanline copy shrinks to ~249 rows (core1 stack cut to 6 KB).
-  Bluetooth mice work through the same HID path (motion, buttons, wheel = weapon cycle; the menu cursor shows
-  only while a mouse is present).
+  *streaming*, `i_sound_piezo.cpp` stops the piezo and the real audio goes there. There is **no buffer**: the SBC
+  encoder asks `DoomSource::fill()` (BTstack context, preempts the game thread) for each frame of PCM and `fill()`
+  mixes it on the spot -- 8 DMX voices (mono, linear interpolation, `presto_pcm_*`), `mus_render()` for music and the
+  connect chime. (An earlier design pumped a PSRAM ring once per frame from `I_SubmitSound()`; any frame longer
+  than the ring's ~58 ms starved it -> audible cuts, and it added that latency.) Game-thread access to voices and
+  to every `mus_*` call is wrapped in a short interrupt-off `IrqLock` so the Bluetooth context never sees a
+  half-updated state; mixing buffers are static (the BT context runs on core 0's 4 KB stack). BOOTSEL mute =
+  `presto_a2dp_set_enabled(false)` (silence, music not rendered). SBC preset `Mono` (154 kbps). The last headset
+  reconnects after boot; the boot menu has Pair/Forget buttons for pad/keyboard and for audio and a combined status
+  line. A headset starting to stream unmutes. Costs ~36 KB SRAM (AVDTP/AVRCP pools, 1 KB ACL buffers,
+  `PICO_STACK_SIZE=0x1000`; core1 stack 6 KB; `states[]`/`mobjinfo[]` relocation pays it back, heap ~315 KB).
+  Bluetooth mice work through the same HID path (motion, buttons, wheel = weapon cycle; the menu cursor shows only
+  while a mouse is present). Console diagnostics every 5 s while streaming (`PicoDoom: audio: ...`).
 - **LEDs** (`src/i_leds_presto.cpp`, 7 WS2812 on PIO0 SM3): health gradient green(>=100%)->orange(50%)->red(0%) at 25% brightness; 450 ms flashes red (health down), green (health up), blue (any other gain: ammo/armour/weapon/key/power-up). Driven by diffing `players[consoleplayer]` from `i_input_backend_poll()` -- no engine edits; dark outside a level. `i_leds_init()` must run before `cyw43_arch_init()` (PIO0 gpio_base 16).
 - **SRAM** (520 KB): engine statics ~215 KB incl. Bluetooth (~18 KB without lwIP/mbedtls, thanks to
   `PICO_TOOLSET_BLUETOOTH_NO_WIFI`) -> ~300 KB heap. No blit slots here (the RGB bus needs none).

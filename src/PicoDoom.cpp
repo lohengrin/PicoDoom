@@ -12,6 +12,9 @@
 extern "C" {
 #include "d_main.h"
 #include "m_argv.h"
+#ifdef PICODOOM_PRESTO
+void I_RelocateInfoTables(void); // doom/info.c
+#endif
 }
 
 #include "pico_toolset/psram.h"
@@ -174,6 +177,9 @@ int main(void)
     printf("PicoDoom: PSRAM OK (%u KB, clock=%u Hz)\n",
            (unsigned)(psram.size_bytes / 1024), (unsigned)psram.clock_hz);
 
+#ifdef PICODOOM_PRESTO
+    I_RelocateInfoTables(); // states[]/mobjinfo[] into PSRAM (doom/info.c): -40 KB of SRAM
+#endif
     printf("PicoDoom: uSD mount...\n");
     // No card / mount failure is a normal, recoverable state (a board with
     // no card inserted, per pico_toolset::SdCard::init()'s own doc comment)
