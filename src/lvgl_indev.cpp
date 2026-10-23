@@ -75,6 +75,12 @@ void mouse_read_cb(lv_indev_t* indev, lv_indev_data_t* data)
     }
 
     HidMouse mouse = ctx.usb->mouse_state();
+    if (g_cursor != nullptr) {
+        if (mouse.present)
+            lv_obj_remove_flag(g_cursor, LV_OBJ_FLAG_HIDDEN);
+        else
+            lv_obj_add_flag(g_cursor, LV_OBJ_FLAG_HIDDEN);
+    }
     if (!mouse.present) {
         data->state = LV_INDEV_STATE_RELEASED;
         return;

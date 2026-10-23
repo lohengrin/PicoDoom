@@ -69,6 +69,17 @@ PSRAM, uSD (SPI0), piezo GPIO43, QW/ST I2C0 (QwSTPad 0x21), CYW43 radio used for
   zero-crossing pitch + loudness, built at first play), priority-arbitrated; music = MUS sequencer
   stepped without synthesis (`mus_step`/`mus_lead` in `mus_player.cpp`), lead voice only, preempted
   by SFX. `doom/s_sound.c` PICO stubs are now gated on `PICODOOM_AUDIO` (hdmi + presto).
+- **Bluetooth audio (A2DP)** (`src/presto_a2dp.cpp`, `-DPICODOOM_PRESTO_A2DP=ON` default): when a headset is
+  *streaming*, `i_sound_piezo.cpp` stops the piezo and routes real audio there: an 8-voice mono mixer for the
+  DMX samples (linear interpolation, `presto_pcm_*`) plus `mus_render()` for music, written into a 4096-sample
+  mono ring that `DoomSource::fill()` (BTstack context, SBC encoder) drains; the game thread tops the ring up to
+  ~2560 samples (~58 ms) from `I_SubmitSound()` (consumption-driven, no clock drift; an empty ring is silence).
+  SBC preset `Mono` (154 kbps) to leave radio time for the pad. The last headset is stored by BTstack and
+  reconnects after boot; the boot menu has Pair/Forget buttons for pad/keyboard and for audio plus a combined
+  status line. BOOTSEL mute applies to both outputs. Costs ~36 KB SRAM (AVDTP/AVRCP pools, 1 KB ACL buffers,
+  `PICO_STACK_SIZE=0x1000`, ring), so the hi-res scanline copy shrinks to ~249 rows (core1 stack cut to 6 KB).
+  Bluetooth mice work through the same HID path (motion, buttons, wheel = weapon cycle; the menu cursor shows
+  only while a mouse is present).
 - **LEDs** (`src/i_leds_presto.cpp`, 7 WS2812 on PIO0 SM3): health gradient green(>=100%)->orange(50%)->red(0%) at 25% brightness; 450 ms flashes red (health down), green (health up), blue (any other gain: ammo/armour/weapon/key/power-up). Driven by diffing `players[consoleplayer]` from `i_input_backend_poll()` -- no engine edits; dark outside a level. `i_leds_init()` must run before `cyw43_arch_init()` (PIO0 gpio_base 16).
 - **SRAM** (520 KB): engine statics ~215 KB incl. Bluetooth (~18 KB without lwIP/mbedtls, thanks to
   `PICO_TOOLSET_BLUETOOTH_NO_WIFI`) -> ~300 KB heap. No blit slots here (the RGB bus needs none).

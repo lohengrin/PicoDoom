@@ -10,6 +10,8 @@
 //  * Music: src/mus_player.cpp's sequencer, stepped without synthesis, lends its
 //    loudest/highest melodic voice to the piezo while no SFX is sounding.
 //
+// While a Bluetooth headset is streaming (src/presto_a2dp.cpp) the piezo stays off and the
+// real samples/music go to the headset instead.
 // Muted by default; the BOOTSEL button toggles mute (polled once per I_SubmitSound()).
 //
 // Everything runs from I_SubmitSound(), which the main loop calls once per iteration
@@ -43,6 +45,27 @@ extern "C" {
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+
+// Bluetooth audio (src/presto_a2dp.cpp): while a headset is streaming it takes over from the piezo.
+#ifdef PICODOOM_A2DP
+bool presto_a2dp_streaming();
+bool presto_a2dp_take_stream_started(); // true once per transition to Streaming
+void presto_a2dp_pump(bool music);
+bool presto_pcm_start(int handle, const uint8_t* data, uint32_t length, uint32_t rate, int vol, int pitch);
+void presto_pcm_stop(int handle);
+bool presto_pcm_playing(int handle);
+void presto_pcm_update(int handle, int vol);
+void presto_pcm_flush();
+#else
+inline bool presto_a2dp_streaming() { return false; }
+inline bool presto_a2dp_take_stream_started() { return false; }
+inline void presto_a2dp_pump(bool) {}
+inline bool presto_pcm_start(int, const uint8_t*, uint32_t, uint32_t, int, int) { return false; }
+inline void presto_pcm_stop(int) {}
+inline bool presto_pcm_playing(int) { return false; }
+inline void presto_pcm_update(int, int) {}
+inline void presto_pcm_flush() {}
+#endif
 
 namespace {
 
@@ -170,12 +193,16 @@ void build_contour(int id, const uint8_t* pcm, uint32_t count, uint32_t rate) {
     g_contours[id].level = level;
 }
 
-void load_sfx(sfxinfo_t* sfx, int id) {
+void load_sfx(sfxinfo_t* sfx) {
     if (!sfx->data) {
         if (sfx->lumpnum < 0)
             sfx->lumpnum = I_GetSfxLumpNum(sfx);
         sfx->data = W_CacheLumpNum(sfx->lumpnum, PU_STATIC);
     }
+}
+
+// Piezo path only: the pitch/loudness contour is built on first use.
+void ensure_contour(sfxinfo_t* sfx, int id) {
     if (!g_contour_built[id]) {
         const auto* hdr = static_cast<const DmxHeader*>(sfx->data);
         // DMX: 8-byte header, then (count - 32) PCM bytes padded by 16 each end.
@@ -231,7 +258,7 @@ extern "C" {
 
 void I_InitSound(void) {
     g_piezo.init(pico_toolset::configs::piezo::kPimoroniPresto);
-    printf("I_InitSound: piezo on GPIO43 (single voice, contour SFX + lead-voice music), muted -- BOOTSEL toggles\n");
+    printf("I_InitSound: piezo on GPIO43 (single voice, contour SFX + lead-voice music; Bluetooth headset takes over when streaming), muted -- BOOTSEL toggles\n");
 }
 
 void I_UpdateSound(void) {}
@@ -247,13 +274,25 @@ void I_SubmitSound(void) {
             if (g_muted) {
                 g_sfx.active = false;
                 g_music_last_us = 0; // no tick catch-up after unmuting
+                presto_pcm_flush();
                 set_silent();
             }
         }
         g_prev_bootsel = pressed;
     }
+    if (presto_a2dp_take_stream_started() && g_muted) {
+        g_muted = false; // connecting a headset is a deliberate "I want sound"; BOOTSEL mutes again
+        printf("PicoDoom: sound on (headset streaming; BOOTSEL toggles)\n");
+    }
     if (g_muted)
         return;
+    if (presto_a2dp_streaming()) { // headset connected: real audio there, piezo off
+        g_sfx.active = false;
+        g_music_last_us = 0;
+        set_silent();
+        presto_a2dp_pump(mus_is_playing() && g_music_volume > 0);
+        return;
+    }
     if (g_sfx.active) {
         if (play_sfx(now_us))
             return;
@@ -280,14 +319,21 @@ int I_GetSfxLumpNum(sfxinfo_t* sfx) {
 
 int I_StartSound(int id, int vol, int sep, int pitch, int priority) {
     (void)sep;
-    (void)pitch;
     if (id < 1 || id >= NUMSFX)
         return -1;
     if (g_muted)
         return -1;
-    if (g_sfx.active && priority > g_sfx.priority)
+    if (!presto_a2dp_streaming() && g_sfx.active && priority > g_sfx.priority)
         return -1; // the playing sound matters more
-    load_sfx(&S_sfx[id], id);
+    load_sfx(&S_sfx[id]);
+    if (presto_a2dp_streaming()) {
+        const auto* hdr = static_cast<const DmxHeader*>(S_sfx[id].data);
+        const int handle = g_next_handle++;
+        return presto_pcm_start(handle, reinterpret_cast<const uint8_t*>(hdr) + sizeof(DmxHeader),
+                                hdr->sample_count, hdr->sample_rate, vol, pitch)
+                   ? handle : -1;
+    }
+    ensure_contour(&S_sfx[id], id);
     if (g_contours[id].windows == 0)
         return -1;
 
@@ -302,6 +348,7 @@ int I_StartSound(int id, int vol, int sep, int pitch, int priority) {
 }
 
 void I_StopSound(int handle) {
+    presto_pcm_stop(handle);
     if (g_sfx.active && g_sfx.handle == handle) {
         g_sfx.active = false;
         set_silent();
@@ -309,12 +356,13 @@ void I_StopSound(int handle) {
 }
 
 int I_SoundIsPlaying(int handle) {
-    return g_sfx.active && g_sfx.handle == handle;
+    return (g_sfx.active && g_sfx.handle == handle) || presto_pcm_playing(handle);
 }
 
 void I_UpdateSoundParams(int handle, int vol, int sep, int pitch) {
     (void)sep;
     (void)pitch;
+    presto_pcm_update(handle, vol);
     if (g_sfx.active && g_sfx.handle == handle)
         g_sfx.gain = std::clamp(static_cast<float>(vol) / 127.0f, 0.0f, 1.0f);
 }

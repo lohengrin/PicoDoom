@@ -57,6 +57,9 @@ set(PICODOOM_PRESTO_MODE "scanline" CACHE STRING "Presto panel feed: scanline | 
 set_property(CACHE PICODOOM_PRESTO_MODE PROPERTY STRINGS scanline palette)
 set(PICODOOM_PRESTO_SYSCLK_MHZ 264 CACHE STRING "Presto clk_sys in MHz (264 hardware-verified, 150 = SDK stock)")
 option(PICODOOM_PRESTO_BT_CLASSIC "Presto: also support Bluetooth Classic HID (older gamepads/keyboards)" ON)
+# A2DP source: game sound to a Bluetooth headset (replaces the piezo while streaming). Costs
+# ~20 KB of SRAM (AVDTP/AVRCP pools, SBC encoder, 8 KB PCM ring) and forces Classic.
+option(PICODOOM_PRESTO_A2DP "Presto: stream game audio to a Bluetooth headset (A2DP)" ON)
 if(PICODOOM_VIDEO_OUTPUT STREQUAL "presto")
     if(NOT PICODOOM_PRESTO_MODE MATCHES "^(scanline|palette)$")
         message(FATAL_ERROR "PICODOOM_PRESTO_MODE must be 'scanline' or 'palette', got '${PICODOOM_PRESTO_MODE}'")
@@ -105,6 +108,7 @@ foreach(_presto_only ST7701 FT6236 PIEZO QWSTPAD WS2812)
 endforeach()
 set(PICO_TOOLSET_BUILD_BLUETOOTH OFF CACHE BOOL "" FORCE)
 set(PICO_TOOLSET_BUILD_BLUETOOTH_HID OFF CACHE BOOL "" FORCE)
+set(PICO_TOOLSET_BUILD_BLUETOOTH_A2DP OFF CACHE BOOL "" FORCE)
 if(PICODOOM_VIDEO_OUTPUT STREQUAL "presto")
     set(PICO_TOOLSET_BUILD_ILI9486 OFF CACHE BOOL "" FORCE)
     set(PICO_TOOLSET_BUILD_ST7796 OFF CACHE BOOL "" FORCE)
@@ -118,6 +122,11 @@ if(PICODOOM_VIDEO_OUTPUT STREQUAL "presto")
     # Bluetooth only: cyw43_arch_none + BTstack, no lwIP/mbedtls (~45 KB SRAM saved).
     set(PICO_TOOLSET_BLUETOOTH_NO_WIFI ON CACHE BOOL "" FORCE)
     set(PICO_TOOLSET_BLUETOOTH_CLASSIC ${PICODOOM_PRESTO_BT_CLASSIC} CACHE BOOL "" FORCE)
+    if(PICODOOM_PRESTO_A2DP)
+        set(PICO_TOOLSET_BUILD_BLUETOOTH_A2DP ON CACHE BOOL "" FORCE) # forces Classic itself
+    else()
+        set(PICO_TOOLSET_BUILD_BLUETOOTH_A2DP OFF CACHE BOOL "" FORCE)
+    endif()
 elseif(PICODOOM_VIDEO_OUTPUT STREQUAL "hdmi")
     set(PICO_TOOLSET_BUILD_ILI9486 OFF CACHE BOOL "" FORCE)
     set(PICO_TOOLSET_BUILD_ST7796 OFF CACHE BOOL "" FORCE)
@@ -325,6 +334,9 @@ else()
 endif()
 if(PICODOOM_VIDEO_OUTPUT STREQUAL "presto")
     set(PICODOOM_INPUT_SRC src/i_input_presto.cpp src/i_leds_presto.cpp)
+    if(PICODOOM_PRESTO_A2DP)
+        list(APPEND PICODOOM_INPUT_SRC src/presto_a2dp.cpp)
+    endif()
 else()
     set(PICODOOM_INPUT_SRC src/i_input_usbhid.cpp)
 endif()
@@ -397,6 +409,7 @@ target_link_libraries(PicoDoom
     $<$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},presto>:pico_toolset_qwstpad>
     $<$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},presto>:pico_toolset_piezo>
     $<$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},presto>:pico_toolset_ws2812>
+    $<$<AND:$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},presto>,$<BOOL:${PICODOOM_PRESTO_A2DP}>>:pico_toolset_bluetooth_a2dp>
     $<$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},presto>:pico_toolset_bluetooth_hid>
     $<$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},lcd>:pico_toolset_xpt2046>
     $<$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},lcd-st7796>:pico_toolset_xpt2046>
@@ -442,6 +455,10 @@ elseif(PICODOOM_VIDEO_OUTPUT STREQUAL "presto")
     # scanned out; core1 runs only RAM code (src/i_video_presto.cpp), so tell the SDK
     # it need not lock it out (a multicore_lockout victim would also steal core1's FIFO).
     target_compile_definitions(PicoDoom PRIVATE PICO_FLASH_ASSUME_CORE1_SAFE=1)
+    if(PICODOOM_PRESTO_A2DP)
+        # The SBC encoder runs in the BTstack IRQ context on core 0's stack (default 2 KB).
+        target_compile_definitions(PicoDoom PRIVATE PICODOOM_A2DP=1 PICO_STACK_SIZE=0x1000)
+    endif()
 elseif(PICODOOM_VIDEO_OUTPUT STREQUAL "lcd-st7796")
     # Distinguishes the two LCD panel variants for src/board_config.hpp's
     # panel-specific config functions -- both are "not hdmi" so PICODOOM_HDMI

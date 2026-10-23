@@ -84,7 +84,7 @@ byte g_palette_cache[256 * 3];
 
 // core1 stack: St7701::init() runs on it (SPI init sequence, PIO/DMA setup);
 // the scanout loop afterwards is shallow. Not the 2 KB scratch default.
-constexpr size_t kCore1StackWords = 2048; // 8 KB
+constexpr size_t kCore1StackWords = 1536; // 6 KB (A2DP costs ~36 KB of SRAM; hi-res wants the rest)
 uint32_t g_core1_stack[kCore1StackWords];
 
 #ifndef PICODOOM_PRESTO_PALETTE
@@ -101,6 +101,7 @@ uint8_t* g_lowres_copy = nullptr; // 320x200 tear-free copy (low-res only)
 uint8_t* g_head_copy = nullptr;
 size_t g_head_alloc_rows = 0;
 volatile int g_head_rows = 0; // rows of g_head_copy that are valid
+int g_head_start = 0;         // first panel row the copy covers (anchored at the bottom of the 3D view)
 #endif
 
 struct Rgb8 { uint8_t r, g, b; };
@@ -159,7 +160,8 @@ void __not_in_flash_func(line_callback)(int y, uint16_t* line, void*) {
     }
     const uint16_t* lut = g_lut;
     if (g_src_w == kPanelW) {
-        const uint8_t* row = y < g_head_rows ? g_head_copy + y * kPanelW : src + y * kPanelW;
+        const int hy = y - g_head_start; // copy covers [g_head_start, g_head_start + g_head_rows)
+        const uint8_t* row = (hy >= 0 && hy < g_head_rows) ? g_head_copy + hy * kPanelW : src + y * kPanelW;
         const uint32_t* s = reinterpret_cast<const uint32_t*>(row);
         for (int i = 0; i < kPanelW / 4; ++i) {
             const uint32_t w = s[i];
@@ -218,7 +220,7 @@ size_t sram_free_estimate() {
 #ifndef PICODOOM_PRESTO_PALETTE
 void try_alloc_head_copy() {
     g_head_tried = true;
-    constexpr size_t kReserve = 8 * 1024; // slack: R_Init has already run by the first level frame
+    constexpr size_t kReserve = 6 * 1024; // slack: R_Init has already run by the first level frame
     const size_t top = static_cast<size_t>(&__StackLimit - static_cast<char*>(sbrk(0)));
     size_t rows = SCREENHEIGHT - 48; // everything above the status bar (32 * 1.5)
     rows = top > kReserve ? std::min<size_t>(rows, (top - kReserve) / kPanelW) : 0;
@@ -226,7 +228,10 @@ void try_alloc_head_copy() {
         g_head_copy = static_cast<uint8_t*>(malloc(rows * kPanelW));
         g_head_alloc_rows = g_head_copy ? rows : 0;
     }
-    printf("PicoDoom: hi-res scanline: tear-free copy of the top %u rows\n", static_cast<unsigned>(g_head_alloc_rows));
+    // Anchor the copy at the BOTTOM of the 3D view: the weapon, menu text and most sprites that
+    // flicker are drawn last and low; the rows left out at the top are mostly ceiling/sky/walls.
+    g_head_start = static_cast<int>(std::max<size_t>(0, (SCREENHEIGHT - 48) - g_head_alloc_rows));
+    printf("PicoDoom: hi-res scanline: tear-free copy of %u rows ending at the status bar (from row %d)\n", static_cast<unsigned>(g_head_alloc_rows), g_head_start);
 }
 #endif
 
@@ -434,7 +439,7 @@ void I_FinishUpdate(void) {
         if (!g_head_tried && gamestate == GS_LEVEL)
             try_alloc_head_copy();
         if (g_head_alloc_rows) {
-            memcpy(g_head_copy, screens[0], g_head_alloc_rows * kPanelW);
+            memcpy(g_head_copy, screens[0] + g_head_start * kPanelW, g_head_alloc_rows * kPanelW);
             g_head_rows = static_cast<int>(g_head_alloc_rows);
         }
         if (g_src != screens[0]) {

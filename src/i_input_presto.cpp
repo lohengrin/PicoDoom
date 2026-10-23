@@ -22,6 +22,13 @@
 
 void i_leds_init(void);   // src/i_leds_presto.cpp
 void i_leds_update(void);
+#ifdef PICODOOM_A2DP
+void presto_a2dp_init();            // src/presto_a2dp.cpp
+void presto_a2dp_poll();
+void presto_a2dp_start_pairing();
+void presto_a2dp_forget();
+const char* presto_a2dp_status();
+#endif
 
 #include <algorithm>
 #include <cstdint>
@@ -151,6 +158,9 @@ HidSource& i_input_hid(void)
 void i_input_backend_poll(void)
 {
     i_leds_update();
+#ifdef PICODOOM_A2DP
+    presto_a2dp_poll();
+#endif
     if (g_pad_ok)
         g_pad_buttons = g_pad.read_buttons();
     if (!g_bt_ok)
@@ -202,6 +212,9 @@ extern "C" void presto_input_init(void)
     printf("PicoDoom: Bluetooth HID up, %u bonded device(s)\n", static_cast<unsigned>(n));
     if (n == 0)
         g_hid.start_pairing();
+#ifdef PICODOOM_A2DP
+    presto_a2dp_init();
+#endif
 }
 
 // -- boot menu hooks ----------------------------------------------------------
@@ -219,10 +232,24 @@ extern "C" void presto_bt_forget_all(void)
         g_hid.forget_all();
 }
 
+extern "C" void presto_audio_start_pairing(void)
+{
+#ifdef PICODOOM_A2DP
+    presto_a2dp_start_pairing();
+#endif
+}
+
+extern "C" void presto_audio_forget(void)
+{
+#ifdef PICODOOM_A2DP
+    presto_a2dp_forget();
+#endif
+}
+
 // One-line status for the menu: connection summary, pairing state or passkey.
 extern "C" const char* presto_bt_status(void)
 {
-    static char text[64];
+    static char text[120];
     if (!g_bt_ok) {
         snprintf(text, sizeof(text), "Bluetooth unavailable");
     } else if (g_passkey != 0) {
@@ -235,5 +262,11 @@ extern "C" const char* presto_bt_status(void)
         snprintf(text, sizeof(text), "BT: %u kbd  %u pad  %u mouse",
                  g_hid.connected_keyboard_count(), g_hid.connected_gamepad_count(), g_hid.connected_mouse_count());
     }
+#ifdef PICODOOM_A2DP
+    if (g_bt_ok && g_passkey == 0) {
+        const size_t used = strlen(text);
+        snprintf(text + used, sizeof(text) - used, "  |  %s", presto_a2dp_status());
+    }
+#endif
     return text;
 }

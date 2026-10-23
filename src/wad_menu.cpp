@@ -53,6 +53,8 @@ void lvgl_display_presto_init(void); // lvgl_display_presto.cpp
 void lvgl_indev_init_touch_ft6236(void); // lvgl_indev.cpp (Presto's FT6236)
 void presto_bt_start_pairing(void); // i_input_presto.cpp
 void presto_bt_forget_all(void);
+void presto_audio_start_pairing(void);
+void presto_audio_forget(void);
 const char* presto_bt_status(void);
 #elif !defined(PICODOOM_HDMI)
 // DisplayPanel&, not the concrete Ili9486/St7796 -- this menu only needs
@@ -262,7 +264,7 @@ extern "C" bool wad_menu_run(bool sd_available)
     // title block and the bottom hint row.
     lv_obj_t* list = lv_obj_create(scr);
 #ifdef PICODOOM_PRESTO
-    constexpr int kBtRowRef = 22; // Bluetooth status row above the hint
+    constexpr int kBtRowRef = 42; // Bluetooth status + button rows above the hint
 #else
     constexpr int kBtRowRef = 0;
 #endif
@@ -353,16 +355,26 @@ extern "C" bool wad_menu_run(bool sd_available)
 #endif
 
 #ifdef PICODOOM_PRESTO
-    // Bluetooth: status line (connections / pairing passkey) and Pair / Forget buttons.
+    // Bluetooth: status line (pad/keyboard/mouse connections, pairing passkey, headset) and a
+    // row of Pair / Forget buttons for input devices and for the audio headset.
     lv_obj_t* bt_label = lv_label_create(scr);
     lv_label_set_text(bt_label, presto_bt_status());
     lv_obj_set_style_text_font(bt_label, &lv_font_montserrat_12, 0);
-    lv_obj_align(bt_label, LV_ALIGN_BOTTOM_MID, 0, -scale_y(8 + kBtRowRef - 4));
+    lv_obj_align(bt_label, LV_ALIGN_BOTTOM_MID, 0, -scale_y(8 + 28 + 14));
     if (sd_available) {
-        auto make_bt_button = [&](const char* text, int x_off, lv_event_cb_t cb) {
-            lv_obj_t* b = lv_button_create(scr);
-            lv_obj_set_size(b, scale_x(76), scale_y(26));
-            lv_obj_align(b, LV_ALIGN_BOTTOM_RIGHT, -scale_x(x_off), -scale_y(6));
+        lv_obj_t* row = lv_obj_create(scr);
+        lv_obj_set_size(row, hor_res - 2 * scale_x(8), scale_y(28));
+        lv_obj_align(row, LV_ALIGN_BOTTOM_MID, 0, -scale_y(8 + 14));
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_all(row, 0, 0);
+        lv_obj_set_style_pad_column(row, scale_x(6), 0);
+        lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(row, 0, 0);
+        lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+        auto make_bt_button = [&](const char* text, lv_event_cb_t cb) {
+            lv_obj_t* b = lv_button_create(row);
+            lv_obj_set_size(b, scale_x(104), scale_y(26));
             lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, nullptr);
             style_nav_button(b);
             lv_obj_t* l = lv_label_create(b);
@@ -371,8 +383,10 @@ extern "C" bool wad_menu_run(bool sd_available)
             lv_obj_center(l);
             lv_group_add_obj(group, b);
         };
-        make_bt_button("Pair BT", 90, [](lv_event_t*) { presto_bt_start_pairing(); });
-        make_bt_button("Forget", 8, [](lv_event_t*) { presto_bt_forget_all(); });
+        make_bt_button("Pair pad/kbd", [](lv_event_t*) { presto_bt_start_pairing(); });
+        make_bt_button("Forget pad", [](lv_event_t*) { presto_bt_forget_all(); });
+        make_bt_button("Pair audio", [](lv_event_t*) { presto_audio_start_pairing(); });
+        make_bt_button("Forget audio", [](lv_event_t*) { presto_audio_forget(); });
     }
 #endif
 
