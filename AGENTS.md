@@ -373,8 +373,8 @@ LCD driver.
   for small `i_*` shims.
 - Follow the validated TOM6809 code for any Pico hardware access.
 - No comments where the code is self-evident; keep the user's style.
-- `README.md` is stale (still describes the old PiCoMonitor SSD1306 demo) — update it
-  when the port progresses, not before.
+- `README.md` describes the current builds (all four variants, options, controls) -- keep it in
+  sync when a variant, CMake option or control changes.
 
 ## Project layout (current)
 
