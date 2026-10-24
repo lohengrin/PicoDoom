@@ -211,8 +211,10 @@ void read_last_from_cfg()
 
 } // namespace
 
-extern "C" char* pico_last_wad = nullptr;
-extern "C" int pico_hires = 0;
+extern "C" {
+char* pico_last_wad = nullptr;
+int pico_hires = 0;
+}
 
 extern "C" const char* pico_selected_wad(void)
 {

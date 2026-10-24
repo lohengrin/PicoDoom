@@ -319,6 +319,8 @@ endforeach()
 
 # Video/sound source swap, driven by PICODOOM_VIDEO_OUTPUT (see above).
 set(PICODOOM_SOUND_SRC doom/i_sound_null.c)
+# The null stubs ignore every parameter by design.
+set_source_files_properties(doom/i_sound_null.c PROPERTIES COMPILE_OPTIONS "-Wno-unused-parameter")
 if(PICODOOM_VIDEO_OUTPUT STREQUAL "hdmi")
     set(PICODOOM_VIDEO_SRC src/i_video_dvi.cpp)
     # Phase B (SFX) of docs/HDMI_PLAN.md's rollout -- see src/i_sound_dvi.cpp.
