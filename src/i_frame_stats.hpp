@@ -1,6 +1,6 @@
 // Shared per-frame CPU-time breakdown, filled in from portable engine code
 // (doom/d_main.c) and read back by whichever video backend is compiled in
-// (i_video_ili9486.cpp / i_video_st7796.cpp / i_video_dvi.cpp) to extend its
+// (i_video_spi_lcd.cpp / i_video_dvi.cpp) to extend its
 // own 10s stats line. Exists because that line's existing core0-wait/
 // core0-convert fields only cover I_FinishUpdate()'s own blit pipeline --
 // they say nothing about the game tic / 3D render / 2D draw time that

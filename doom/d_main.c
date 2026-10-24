@@ -187,13 +187,13 @@ extern boolean setsizeneeded;
 extern int showMessages;
 void R_ExecuteSetViewSize(void);
 
-#ifdef PICODOOM_PRESTO
+#ifdef PICODOOM_DEFERRED_VIDEO_COPY
 extern void presto_video_flush(void); /* src/i_video_presto.cpp */
 #endif
 
 void D_Display(void)
 {
-#ifdef PICODOOM_PRESTO
+#ifdef PICODOOM_DEFERRED_VIDEO_COPY
 	/* The previous frame's copy to the panel buffer must be done before we draw into screens[0]. */
 	presto_video_flush();
 #endif

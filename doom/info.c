@@ -139,7 +139,7 @@ void A_SpawnFly();
 void A_BrainExplode();
 
 
-#ifdef PICODOOM_PRESTO
+#ifdef PICODOOM_INFO_IN_PSRAM
 static const state_t states_init[NUMSTATES] = {
 #else
 state_t	states[NUMSTATES] = {
@@ -1114,7 +1114,7 @@ state_t	states[NUMSTATES] = {
 };
 
 
-#ifdef PICODOOM_PRESTO
+#ifdef PICODOOM_INFO_IN_PSRAM
 static const mobjinfo_t mobjinfo_init[NUMMOBJTYPES] = {
 #else
 mobjinfo_t mobjinfo[NUMMOBJTYPES] = {
@@ -4683,7 +4683,7 @@ mobjinfo_t mobjinfo[NUMMOBJTYPES] = {
     }
 };
 
-#ifdef PICODOOM_PRESTO
+#ifdef PICODOOM_INFO_IN_PSRAM
 /* states[] and mobjinfo[] are written at runtime only by G_Fast parms (nightmare / -fast), so
    they cannot live in flash, but they are read rarely enough to live in PSRAM instead of the
    40 KB of SRAM they would take as initialised data. The const images above stay in flash and

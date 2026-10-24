@@ -30,7 +30,7 @@
 #if defined(PICODOOM_PRESTO)
 #include "pico_toolset/ft6236.h"
 #include "pico_toolset/ft6236_configs.h"
-#elif !defined(PICODOOM_HDMI)
+#elif defined(PICODOOM_SPI_LCD)
 #include "pico_toolset/display_panel.h"
 #include "pico_toolset/xpt2046.h"
 #include "pico_toolset/xpt2046_calibration.h"
@@ -39,11 +39,11 @@
 
 #include <cstdint>
 
-#if !defined(PICODOOM_HDMI) && !defined(PICODOOM_PRESTO)
+#ifdef PICODOOM_SPI_LCD
 // DisplayPanel&, not the concrete Ili9486/St7796 -- see wad_menu.cpp's
 // identically-declared forward decl for why (works unchanged for either LCD
 // panel this project supports).
-extern "C" pico_toolset::DisplayPanel& i_video_lcd_display(void); // i_video_ili9486.cpp / i_video_st7796.cpp
+extern "C" pico_toolset::DisplayPanel& i_video_lcd_display(void); // i_video_spi_lcd.cpp
 #endif
 
 namespace {
@@ -129,7 +129,7 @@ void touch_read_cb(lv_indev_t* indev, lv_indev_data_t* data)
     data->point.y = t.raw_y;
     data->state = LV_INDEV_STATE_PRESSED;
 }
-#elif !defined(PICODOOM_HDMI)
+#elif defined(PICODOOM_SPI_LCD)
 void touch_read_cb(lv_indev_t* indev, lv_indev_data_t* data)
 {
     auto& touch = *static_cast<pico_toolset::Xpt2046Touch*>(lv_indev_get_user_data(indev));
@@ -159,7 +159,7 @@ void touch_read_cb(lv_indev_t* indev, lv_indev_data_t* data)
     data->point.y = static_cast<int32_t>(lcd_y);
     data->state = LV_INDEV_STATE_PRESSED;
 }
-#endif // !PICODOOM_HDMI
+#endif // touch
 
 // ---------------------------------------------------------------------------
 // keypad (both builds)
@@ -253,7 +253,7 @@ extern "C" void lvgl_indev_init_touch_ft6236(void)
     lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
     lv_indev_set_read_cb(indev, touch_read_cb);
 }
-#elif !defined(PICODOOM_HDMI)
+#elif defined(PICODOOM_SPI_LCD)
 extern "C" void lvgl_indev_init_touch(pico_toolset::Xpt2046Touch& touch)
 {
     lv_indev_t* indev = lv_indev_create();

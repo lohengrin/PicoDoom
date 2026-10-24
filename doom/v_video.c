@@ -42,7 +42,7 @@ rcsid[] = "$Id: v_video.c,v 1.5 1997/02/03 22:45:13 b1 Exp $";
 #include "v_video.h"
 
 
-#ifndef PICODOOM_HDMI
+#ifdef PICODOOM_RUNTIME_RES
 // Runtime screen geometry for the lcd builds (see the SCREENWIDTH comment in
 // doomdef.h): defaults to the largest mode, overwritten exactly once, before
 // D_DoomMain() runs, by i_video_lcd_set_hires() (src/i_video_*.cpp) once the
@@ -573,7 +573,7 @@ void V_Init (void)
 		
     // stick these in low dos memory on PCs
 
-#if defined(PICO) && !defined(PICODOOM_HDMI)
+#if defined(PICO) && defined(PICODOOM_RUNTIME_RES)
     /* screens[0] is the hot one: every column/span/sprite/status-bar pixel
        is written to it and the blit reads all of it each frame, so keep it
        in SRAM (a fixed address, never moved -- see src/i_video_ili9486.cpp's
@@ -584,7 +584,7 @@ void V_Init (void)
 	extern void *I_TrySramMalloc (size_t);
 	size_t	size = (size_t)SCREENWIDTH*SCREENHEIGHT;
 
-#ifdef PICODOOM_PRESTO
+#ifdef PICODOOM_VIDEO_OWNS_SCREEN0
 	/* Presto palette mode, hi-res: screens[0] IS the panel's framebuffer. */
 	extern byte *i_video_presto_screen0 (size_t);
 	screens[0] = i_video_presto_screen0 (size);

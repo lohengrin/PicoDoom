@@ -8,7 +8,7 @@
 // from inside core1_entry() (via UsbHidHost::init() with run_on_core1=false
 // -- kWaveshareRp2350PiZeroLcdManualCore1 -- rather than letting init()
 // spawn and own core1 itself), letting this same core1 loop also drive
-// i_video_core1_step() (the LCD chunked blit, src/i_video_ili9486.cpp)
+// i_video_core1_step() (the LCD chunked blit, src/i_video_spi_lcd.cpp)
 // interleaved with tuh_task() -- see i_video_core1.hpp for why that
 // interleaving (not one blocking per-frame blit call) matters: Pico-PIO-USB's
 // software-timed bus servicing would otherwise starve for the ~41ms a full
@@ -27,7 +27,7 @@
 #include "hid_source.hpp"
 #include "pico_toolset/usb_hid_host.h"
 #include "pico_toolset/usb_hid_configs.h"
-#ifndef PICODOOM_HDMI
+#ifdef PICODOOM_SPI_LCD
 #include "i_video_core1.hpp"
 #endif
 
@@ -63,7 +63,7 @@ public:
 
 UsbHidSource g_source;
 
-#ifndef PICODOOM_HDMI
+#ifdef PICODOOM_SPI_LCD
 // core1's stack -- deliberately not the default multicore_launch_core1()
 // mechanism, which reserves PICO_CORE1_STACK_SIZE out of the tiny, fixed
 // SCRATCH_X SRAM bank (a couple KB at most -- too small for the TinyUSB host
@@ -85,11 +85,11 @@ void core1_entry()
         i_video_core1_step();
     }
 }
-#endif // !PICODOOM_HDMI
+#endif // PICODOOM_SPI_LCD
 
 } // namespace
 
-#ifndef PICODOOM_HDMI
+#ifdef PICODOOM_SPI_LCD
 // Launches core1 (see core1_entry() above). Called once from main()
 // (src/PicoDoom.cpp), before D_DoomMain() -- gives the keyboard time to
 // enumerate while the WAD loads and the engine initializes.

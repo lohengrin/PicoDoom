@@ -12,7 +12,7 @@
 extern "C" {
 #include "d_main.h"
 #include "m_argv.h"
-#ifdef PICODOOM_PRESTO
+#ifdef PICODOOM_INFO_IN_PSRAM
 void I_RelocateInfoTables(void); // doom/info.c
 #endif
 }
@@ -21,13 +21,13 @@ void I_RelocateInfoTables(void); // doom/info.c
 #include "pico_toolset/fault_handler.h"
 #include "board_config.hpp"
 extern "C" bool sd_init(void);
-#ifndef PICODOOM_HDMI
+#ifdef PICODOOM_RUNTIME_RES
 extern "C" void i_video_lcd_set_hires(int hires); // src/i_video_{ili9486,st7796}.cpp
 #endif
 extern "C" bool wad_menu_run(bool sd_available); // src/wad_menu.cpp (Phase 4 boot WAD-selection menu)
 #if defined(PICODOOM_PRESTO)
 extern "C" void presto_input_init(void); // src/i_input_presto.cpp (QwSTPad + Bluetooth HID)
-#elif !defined(PICODOOM_HDMI)
+#elif defined(PICODOOM_SPI_LCD)
 extern "C" void usb_hid_core1_init(void); // src/i_input_usbhid.cpp
 #else
 extern "C" void usb_hid_core0_init(void); // src/i_input_usbhid.cpp
@@ -116,7 +116,7 @@ int main(void)
 #endif
 
     // clk_peri (the SPI baud generator's clock source, see
-    // src/i_video_ili9486.cpp plus the serial console's 'pclk' command) does NOT automatically follow
+    // src/i_video_spi_lcd.cpp) does NOT automatically follow
     // clk_sys by pico-sdk default: set_sys_clock_khz()/set_sys_clock_pll()
     // only re-source it from clk_sys when the SDK is built with
     // PICO_CLOCK_ADJUST_PERI_CLOCK_WITH_SYS_CLOCK (off here) -- otherwise
@@ -150,7 +150,7 @@ int main(void)
     // running, not just what the source says it should be. PSRAM's and the
     // SPI pixel clock's achieved rates print further down, right after
     // their own init (psram_init() below; I_InitGraphics(),
-    // src/i_video_ili9486.cpp, deep inside D_DoomMain()) since neither is
+    // src/i_video_spi_lcd.cpp, deep inside D_DoomMain()) since neither is
     // known until then.
     {
         uint32_t flash_clkdiv = (qmi_hw->m[0].timing & QMI_M0_TIMING_CLKDIV_BITS) >> QMI_M0_TIMING_CLKDIV_LSB;
@@ -177,7 +177,7 @@ int main(void)
     printf("PicoDoom: PSRAM OK (%u KB, clock=%u Hz)\n",
            (unsigned)(psram.size_bytes / 1024), (unsigned)psram.clock_hz);
 
-#ifdef PICODOOM_PRESTO
+#ifdef PICODOOM_INFO_IN_PSRAM
     I_RelocateInfoTables(); // states[]/mobjinfo[] into PSRAM (doom/info.c): -40 KB of SRAM
 #endif
     printf("PicoDoom: uSD mount...\n");
@@ -199,7 +199,7 @@ int main(void)
 #if defined(PICODOOM_PRESTO)
     printf("PicoDoom: QwSTPad + Bluetooth HID init...\n");
     presto_input_init();
-#elif !defined(PICODOOM_HDMI)
+#elif defined(PICODOOM_SPI_LCD)
     printf("PicoDoom: USB-PIO keyboard host init (core1)...\n");
     usb_hid_core1_init();
 #else
@@ -215,7 +215,7 @@ int main(void)
     // so the no-uSD path (no checkbox) still picks the right mode.
     pico_hires = pico_hires_setting();
     wad_menu_run(sd_available);
-#ifndef PICODOOM_HDMI
+#ifdef PICODOOM_RUNTIME_RES
     i_video_lcd_set_hires(pico_hires);
 #endif
 

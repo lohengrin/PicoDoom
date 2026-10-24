@@ -76,7 +76,7 @@ include(pico_sdk_import.cmake)
 
 project(PicoDoom C CXX ASM)
 set(CMAKE_C_STANDARD 11)
-# 20, not 17: Pico-Toolset's pico_toolset::Ili9486 (src/i_video_ili9486.cpp)
+# 20, not 17: Pico-Toolset's pico_toolset::Ili9486 (src/i_video_spi_lcd.cpp)
 # uses std::span, C++20-only.
 set(CMAKE_CXX_STANDARD 20)
 
@@ -220,7 +220,7 @@ doom/i_system.c
 #doom/i_video.c     # X11 — not linkable on Pico
 #doom/i_net.c       # Linux IPX — not linkable on Pico
 #doom/i_video_pimoroni.c   # also X11 (misnomer)
-#doom/i_video_null.c       # headless stub, replaced by src/i_video_ili9486.cpp
+#doom/i_video_null.c       # headless stub, replaced by src/i_video_spi_lcd.cpp
 #doom/i_sound_null.c       # headless stub -- added below via PICODOOM_SOUND_SRC instead
 doom/i_net_null.c
 doom/tables.c
@@ -328,11 +328,11 @@ if(PICODOOM_VIDEO_OUTPUT STREQUAL "hdmi")
 elseif(PICODOOM_VIDEO_OUTPUT STREQUAL "presto")
     set(PICODOOM_VIDEO_SRC src/i_video_presto.cpp)
     # Single piezo voice -- see src/i_sound_piezo.cpp.
-    set(PICODOOM_SOUND_SRC src/i_sound_piezo.cpp src/mus_player.cpp)
+    set(PICODOOM_SOUND_SRC src/i_sound_piezo.cpp src/presto_mixer.cpp src/mus_player.cpp)
 elseif(PICODOOM_VIDEO_OUTPUT STREQUAL "lcd-st7796")
-    set(PICODOOM_VIDEO_SRC src/i_video_st7796.cpp)
+    set(PICODOOM_VIDEO_SRC src/i_video_spi_lcd.cpp)
 else()
-    set(PICODOOM_VIDEO_SRC src/i_video_ili9486.cpp)
+    set(PICODOOM_VIDEO_SRC src/i_video_spi_lcd.cpp)
 endif()
 if(PICODOOM_VIDEO_OUTPUT STREQUAL "presto")
     set(PICODOOM_INPUT_SRC src/i_input_presto.cpp src/i_leds_presto.cpp)
@@ -403,6 +403,7 @@ target_link_libraries(PicoDoom
     pico_toolset_sdcard
     pico_toolset_psram
     pico_toolset_fault_handler
+    pico_toolset_rp_util
     $<$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},lcd>:pico_toolset_ili9486>
     $<$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},lcd-st7796>:pico_toolset_st7796>
     $<$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},hdmi>:pico_toolset_dvi_hdmi>
@@ -437,7 +438,7 @@ if(PICODOOM_VIDEO_OUTPUT STREQUAL "hdmi")
     # HID host moves from core1 to core0 -- core1 belongs to the DVI encode
     # loop exclusively, see src/i_video_dvi.cpp) and src/PicoDoom.cpp's
     # matching init-call choice.
-    target_compile_definitions(PicoDoom PRIVATE PICODOOM_HDMI=1)
+    target_compile_definitions(PicoDoom PRIVATE PICODOOM_HDMI=1 PICODOOM_DEFAULT_HIRES=0)
     # RP2350B's onboard TMDS pins (GPIO32-39) are >=32 -- the PIO block only
     # sees one 32-pin window at a time, and this (plus src/i_video_dvi.cpp's
     # own pio_set_gpio_base() call before dvi_init()) lets it move that
@@ -447,6 +448,9 @@ if(PICODOOM_VIDEO_OUTPUT STREQUAL "hdmi")
     target_compile_definitions(PicoDoom PRIVATE PICO_PIO_USE_GPIO_BASE=1)
 elseif(PICODOOM_VIDEO_OUTPUT STREQUAL "presto")
     target_compile_definitions(PicoDoom PRIVATE PICODOOM_PRESTO=1 PICODOOM_PRESTO_SYSCLK_MHZ=${PICODOOM_PRESTO_SYSCLK_MHZ})
+    # Capabilities (see the block comment below the variant branches).
+    target_compile_definitions(PicoDoom PRIVATE PICODOOM_RUNTIME_RES=1 PICODOOM_INFO_IN_PSRAM=1
+        PICODOOM_DEFERRED_VIDEO_COPY=1 PICODOOM_VIDEO_OWNS_SCREEN0=1 PICODOOM_DEFAULT_HIRES=0)
     # CYW43 PIO SPI must stay <= ~37MHz: divider = ceil(clk_sys / 75) (150->2 SDK default, 200->3, 264->4).
     math(EXPR _cyw43_div "(${PICODOOM_PRESTO_SYSCLK_MHZ} + 74) / 75")
     target_compile_definitions(PicoDoom PRIVATE CYW43_PIO_CLOCK_DIV_INT=${_cyw43_div})
@@ -462,11 +466,21 @@ elseif(PICODOOM_VIDEO_OUTPUT STREQUAL "presto")
         target_compile_definitions(PicoDoom PRIVATE PICODOOM_A2DP=1 PICO_STACK_SIZE=0x1000)
     endif()
 elseif(PICODOOM_VIDEO_OUTPUT STREQUAL "lcd-st7796")
-    # Distinguishes the two LCD panel variants for src/board_config.hpp's
-    # panel-specific config functions -- both are "not hdmi" so PICODOOM_HDMI
-    # alone can't tell them apart.
-    target_compile_definitions(PicoDoom PRIVATE PICODOOM_ST7796=1)
+    target_compile_definitions(PicoDoom PRIVATE PICODOOM_ST7796=1 PICODOOM_SPI_LCD=1 PICODOOM_RUNTIME_RES=1
+        PICODOOM_DEFAULT_HIRES=1)
+else()
+    target_compile_definitions(PicoDoom PRIVATE PICODOOM_ILI9486=1 PICODOOM_SPI_LCD=1 PICODOOM_RUNTIME_RES=1
+        PICODOOM_DEFAULT_HIRES=0)
 endif()
+# Variant identity (PICODOOM_HDMI / _ST7796 / _ILI9486 / _PRESTO) is for code that really is
+# per-board. Everything else tests a capability, so a new board only has to say what it has:
+#   PICODOOM_SPI_LCD              SPI panel behind pico_toolset::DisplayPanel + XPT2046 touch + USB host on core1
+#   PICODOOM_RUNTIME_RES          SCREENWIDTH/HEIGHT are runtime (320x200 or 480x300), screens[0] in SRAM
+#   PICODOOM_DEFAULT_HIRES        boot-menu "High res" default (0/1)
+#   PICODOOM_INFO_IN_PSRAM        states[]/mobjinfo[] live in PSRAM (doom/info.c) to free 40 KB of SRAM
+#   PICODOOM_DEFERRED_VIDEO_COPY  video backend copies the frame when the beam is in the blank band
+#   PICODOOM_VIDEO_OWNS_SCREEN0   video backend may supply screens[0] itself (Presto palette hi-res)
+#   PICODOOM_AUDIO                real sound backend (set below)
 # PICO_PIO_USE_GPIO_BASE=1 no longer needs setting here for the LCD build:
 # pico_toolset_sdcard links pico_fatfs PUBLIC, and
 # third_party/pico-toolset/cmake/pico_fatfs.cmake already sets it as an

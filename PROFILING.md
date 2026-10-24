@@ -10,7 +10,7 @@ aren't enough" below -- this happened twice in the original investigation).
 
 ## 1. Coarse per-frame phase stats (always available)
 
-Every video backend (`src/i_video_ili9486.cpp`, `src/i_video_st7796.cpp`,
+Every video backend (`src/i_video_spi_lcd.cpp`, `src/i_video_spi_lcd.cpp`,
 `src/i_video_dvi.cpp`) prints a line to the serial console every 10 seconds:
 
 ```

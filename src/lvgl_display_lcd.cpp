@@ -16,7 +16,7 @@
 // Draw buffer: PSRAM-backed like TOM6809's DVI driver's (psram_malloc with a
 // plain-heap fallback), NOT the static SRAM array TOM6809's LCD version
 // uses: this whole project is much tighter on SRAM than TOM6809 (DOOM's
-// tables + the game's two 256KB blit buffers -- see src/i_video_ili9486.cpp).
+// tables + the game's two 256KB blit buffers -- see src/i_video_spi_lcd.cpp).
 // Safe because the menu runs entirely on core0 before the game starts; once
 // the game begins, LVGL is done and core1 owns the panel.
 //
@@ -32,7 +32,7 @@
 #include <cstdlib>
 #include <span>
 
-extern "C" pico_toolset::DisplayPanel& i_video_lcd_display(void); // src/i_video_ili9486.cpp / src/i_video_st7796.cpp
+extern "C" pico_toolset::DisplayPanel& i_video_lcd_display(void); // src/i_video_spi_lcd.cpp
 
 namespace {
 constexpr int kBufRows = 40;

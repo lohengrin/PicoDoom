@@ -22,7 +22,7 @@
 // 2026-09 performance work; unified 252MHz (2026-09), LCD raised to 264MHz
 // (2026-09); ST7796U variant added (2026-09, not yet hardware-validated).
 
-#if !defined(PICODOOM_HDMI) && !defined(PICODOOM_ST7796) && !defined(PICODOOM_PRESTO)
+#ifdef PICODOOM_ILI9486
 #include "pico_toolset/ili9486_configs.h"
 #endif
 #ifdef PICODOOM_ST7796
@@ -68,7 +68,7 @@ inline pico_toolset::PsramConfig psram_config() {
 }
 #endif // PICODOOM_PRESTO
 
-#if !defined(PICODOOM_HDMI) && !defined(PICODOOM_ST7796) && !defined(PICODOOM_PRESTO)
+#ifdef PICODOOM_ILI9486
 inline pico_toolset::Ili9486Config ili9486_config() {
     pico_toolset::Ili9486Config c = pico_toolset::configs::ili9486::kWaveshareRp2350PiZero;
     // Request stays at ~33.33MHz, with clk_peri at the LCD build's 264MHz
@@ -79,9 +79,8 @@ inline pico_toolset::Ili9486Config ili9486_config() {
     // 33.0MHz -- right in the clean range confirmed at the original clock
     // (33.33MHz clean, everything from 40MHz up corrupted: 264/6=44MHz and
     // above are unreachable by this request anyway, since the SDK rounds
-    // down, never up). Request value 33'333'333 keeps the serial console's
-    // `pclk` live-tuning (i_video_set_pixel_clock_hz(), src/i_video_ili9486.cpp)
-    // from the same baseline it was validated at.
+    // down, never up). Request value 33'333'333 is the baseline it was
+    // validated at.
     c.pixel_freq_hz = 33'333'333;
     return c;
 }
@@ -90,9 +89,8 @@ inline pico_toolset::Ili9486Config ili9486_config() {
 #ifdef PICODOOM_ST7796
 inline pico_toolset::St7796Config st7796_config() {
     pico_toolset::St7796Config c = pico_toolset::configs::st7796::kWaveshareRp2350PiZero;
-    // Bench-tested on real hardware (2026-09) via the serial console's
-    // live `pclk` tuning (i_video_set_pixel_clock_hz(),
-    // src/i_video_st7796.cpp) -- confirmed clean (no artifacts) all the way
+    // Bench-tested on real hardware (2026-09) with a live pixel-clock tuning
+    // command (since removed) -- confirmed clean (no artifacts) all the way
     // up to 132MHz, which is the fastest rate reachable at all from this
     // build's 264MHz clk_peri (SPI's divisor floor is 2: prescale=2,
     // postdiv=1 -- see ili9486_config()'s comment for the same divisor

@@ -1,7 +1,7 @@
 #pragma once
 
 // Phase 4.5 (performance): the LCD blit (palette->RGB565 + DMA-fed SPI
-// push, see i_video_ili9486.cpp) now runs on core1 instead of core0, so
+// push, see i_video_spi_lcd.cpp) now runs on core1 instead of core0, so
 // core0 is free to move straight on to the next tic's game logic/render
 // instead of blocking on the ~41ms SPI transfer. core1 already runs
 // PicoUsbKeyboard's tuh_task() loop (see PicoUsbKeyboard.cpp) -- that loop

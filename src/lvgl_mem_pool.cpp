@@ -10,7 +10,7 @@
 // present and healthy, else ordinary SRAM heap. The whole boot menu runs on
 // core0 only, so reaching into the single-core XIP-cached PSRAM region is
 // safe (unlike the contrast elsewhere in this project: g_screen_buf/g_framebuf
-// swap with core1 and deliberately stay in SRAM, see i_video_ili9486.cpp).
+// swap with core1 and deliberately stay in SRAM, see i_video_spi_lcd.cpp).
 extern "C" void* lvgl_mem_pool(size_t size) {
     if (pico_toolset::psram_status().test_ok) {
         return pico_toolset::psram_malloc(size);

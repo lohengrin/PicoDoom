@@ -30,8 +30,10 @@
 #include "pico_toolset/st7701.h"
 #include "pico_toolset/st7701_configs.h"
 #include "pico_toolset/psram.h"
+#include "pico_toolset/sram.h"
 #include "board_config.hpp"
 #include "i_frame_stats.hpp"
+#include "i_video_gamma.hpp"
 
 extern "C" {
 #include "doomdef.h"
@@ -53,8 +55,6 @@ extern "C" {
 #include "pico/stdlib.h"
 #include "pico/time.h"
 
-extern "C" char __StackLimit;
-extern "C" char __bss_end__;
 
 namespace {
 
@@ -82,8 +82,7 @@ uint8_t* g_surface = nullptr;
 bool g_double_buffer = false; // hi-res: screens[0] is separate from the framebuffer
 #endif
 
-float g_gamma = 1.4f;
-byte g_palette_cache[256 * 3];
+picodoom::GammaPalette g_pal;
 
 // core1 stack: St7701::init() runs on it (SPI init sequence, PIO/DMA setup);
 // the scanout loop afterwards is shallow. Not the 2 KB scratch default.
@@ -107,21 +106,6 @@ volatile int g_head_rows = 0; // rows of g_head_copy that are valid
 int g_head_start = 0;         // first panel row the copy covers (anchored at the bottom of the 3D view)
 #endif
 
-struct Rgb8 { uint8_t r, g, b; };
-
-Rgb8 apply_gamma(int i) {
-    byte r = gammatable[usegamma][g_palette_cache[i * 3 + 0]];
-    byte g = gammatable[usegamma][g_palette_cache[i * 3 + 1]];
-    byte b = gammatable[usegamma][g_palette_cache[i * 3 + 2]];
-    if (g_gamma != 1.0f) {
-        const float inv = 1.0f / g_gamma;
-        r = static_cast<byte>(255.0f * powf(r / 255.0f, inv) + 0.5f);
-        g = static_cast<byte>(255.0f * powf(g / 255.0f, inv) + 0.5f);
-        b = static_cast<byte>(255.0f * powf(b / 255.0f, inv) + 0.5f);
-    }
-    return {r, g, b};
-}
-
 void set_entry(int i, uint8_t r, uint8_t g, uint8_t b) {
 #ifdef PICODOOM_PRESTO_PALETTE
     g_lcd.set_palette_colour(static_cast<uint8_t>(i), r, g, b);
@@ -133,7 +117,7 @@ void set_entry(int i, uint8_t r, uint8_t g, uint8_t b) {
 
 void rebuild_game_palette() {
     for (int i = 0; i < 256; ++i) {
-        const Rgb8 c = apply_gamma(i);
+        const picodoom::Rgb8 c = g_pal.color(i);
         set_entry(i, c.r, c.g, c.b);
     }
 }
@@ -225,18 +209,14 @@ void wait_for_blank_band() {
     g_sync_wait_us_in_window += time_us_64() - t0;
 }
 
-size_t sram_free_estimate() {
-    struct mallinfo mi = mallinfo();
-    const size_t total = static_cast<size_t>(&__StackLimit - &__bss_end__);
-    const size_t used = static_cast<size_t>(mi.uordblks);
-    return total > used ? total - used : 0;
-}
+using pico_toolset::in_sram;
+using pico_toolset::sram_free_estimate;
 
 #ifndef PICODOOM_PRESTO_PALETTE
 void try_alloc_head_copy() {
     g_head_tried = true;
     constexpr size_t kReserve = 6 * 1024; // slack: R_Init has already run by the first level frame
-    const size_t top = static_cast<size_t>(&__StackLimit - static_cast<char*>(sbrk(0)));
+    const size_t top = pico_toolset::sram_contiguous_free();
     size_t rows = SCREENHEIGHT; // the whole frame if it fits, else the 3D view (everything above the status bar)
     rows = top > kReserve ? std::min<size_t>(rows, (top - kReserve) / kPanelW) : 0;
     if (rows) {
@@ -256,10 +236,6 @@ void try_alloc_head_copy() {
 }
 #endif
 
-bool in_sram(const void* p) {
-    const uintptr_t a = reinterpret_cast<uintptr_t>(p);
-    return a >= 0x20000000u && a < 0x20082000u;
-}
 
 // ---- stats ----------------------------------------------------------------
 uint64_t g_last_frame_start_us = 0;
@@ -286,7 +262,7 @@ void report_stats_if_due(uint64_t now_us) {
         ? 100.0f * static_cast<float>(g_sync_wait_us_in_window) / static_cast<float>(g_frame_us_in_window) : 0.0f;
 
     struct mallinfo mi = mallinfo();
-    const size_t sram_total = static_cast<size_t>(&__StackLimit - &__bss_end__);
+    const size_t sram_total = pico_toolset::sram_heap_total();
     const size_t sram_used = static_cast<size_t>(mi.uordblks);
     const size_t psram_used = pico_toolset::psram_used_bytes();
     const size_t psram_total = pico_toolset::psram_status().size_bytes;
@@ -378,7 +354,7 @@ void I_InitGraphics(void) {
         printf("PicoDoom: ST7701 init FAILED (no free PIO state machine / DMA channel?)\n");
     else
         printf("PicoDoom: ST7701 480x480 up, mode %s, game area 480x%d, surface %u KB, gamma %.2f\n",
-               kModeName, kVisibleH, static_cast<unsigned>(kSurfaceBytes / 1024), g_gamma);
+               kModeName, kVisibleH, static_cast<unsigned>(kSurfaceBytes / 1024), g_pal.gamma());
 }
 
 // Called once after the boot menu, before D_DoomMain().
@@ -437,7 +413,7 @@ uint8_t* i_video_presto_menu_surface(void) {
 void I_ShutdownGraphics(void) {}
 
 void I_SetPalette(byte* palette) {
-    memcpy(g_palette_cache, palette, sizeof(g_palette_cache));
+    g_pal.set_palette(palette);
     rebuild_game_palette();
 }
 
@@ -544,30 +520,14 @@ void I_ReadScreen(byte* scr) {
     memcpy(scr, screens[0], SCREENWIDTH * SCREENHEIGHT);
 }
 
-// The ST7701 dot clock is fixed at init (St7701Config::max_pixel_clock_hz);
-// stubs keep the serial console's non-HDMI `pclk` command linkable.
-uint32_t i_video_pixel_clock_hz(void) {
-    return 0;
-}
-
-void i_video_set_pixel_clock_hz(uint32_t) {
-    printf("PicoDoom: pixel clock is not adjustable on the Presto build\n");
-}
-
 float i_video_gamma(void) {
-    return g_gamma;
+    return g_pal.gamma();
 }
 
 void i_video_set_gamma(float gamma) {
-    constexpr float kMinGamma = 0.1f;
-    constexpr float kMaxGamma = 10.0f;
-    g_gamma = gamma;
-    if (g_gamma < kMinGamma)
-        g_gamma = kMinGamma;
-    else if (g_gamma > kMaxGamma)
-        g_gamma = kMaxGamma;
+    g_pal.set_gamma(gamma);
     rebuild_game_palette();
-    printf("PicoDoom: gamma %.2f\n", g_gamma);
+    printf("PicoDoom: gamma %.2f\n", g_pal.gamma());
 }
 
 void I_StartFrame(void) {}

@@ -99,6 +99,35 @@ bool g_prev_pad_back = false;
 // DOOM meanings.
 bool g_mouse_enabled = true;
 
+// ev_joystick payload from a gamepad (doom/d_event.h): data1 bits 0-3 = A/B/X/Y (the engine's
+// fire/strafe/run/use bindings, joyb_* in doom/m_misc.c), data2/data3 = x/y as -1/0/1 -- the
+// engine only compares them to 0, so a deadzoned sign is both correct and sufficient. High ly =
+// down (pico_toolset's gamepad convention, so no inversion); the D-pad overrides the stick.
+struct Joy {
+    uint8_t buttons;
+    int x, y;
+};
+
+Joy joystick_from(const pico_toolset::GamepadState& pad)
+{
+    constexpr int kStickCenter = 128;
+    constexpr int kDeadzone = 40; // out of 128 each direction from centre
+    const int lx = static_cast<int>(pad.lx) - kStickCenter;
+    const int ly = static_cast<int>(pad.ly) - kStickCenter;
+    Joy j;
+    j.x = (lx > kDeadzone) ? 1 : (lx < -kDeadzone) ? -1 : 0;
+    j.y = (ly > kDeadzone) ? 1 : (ly < -kDeadzone) ? -1 : 0;
+    if (pad.down(pico_toolset::kBtLeft)) j.x = -1;
+    else if (pad.down(pico_toolset::kBtRight)) j.x = 1;
+    if (pad.down(pico_toolset::kBtUp)) j.y = -1;
+    else if (pad.down(pico_toolset::kBtDown)) j.y = 1;
+    j.buttons = static_cast<uint8_t>((pad.down(pico_toolset::kBtA) ? 1 : 0) |
+                                     (pad.down(pico_toolset::kBtB) ? 2 : 0) |
+                                     (pad.down(pico_toolset::kBtX) ? 4 : 0) |
+                                     (pad.down(pico_toolset::kBtY) ? 8 : 0));
+    return j;
+}
+
 void post_key(int doomkey, bool down)
 {
     event_t ev;
@@ -162,36 +191,23 @@ extern "C" void i_input_reset_menu_input(void)
     g_prev_pad_start = pad.present && pad.down(pico_toolset::kBtStart);
     g_prev_pad_back = pad.present && pad.down(pico_toolset::kBtBack);
     if (pad.present) {
-        // Same sign/button derivation I_StartTic() uses -- match it exactly so
-        // the next ev_joystick edge compares against the current reality.
-        constexpr int kStickCenter = 128;
-        constexpr int kDeadzone = 40;
-        int lx = static_cast<int>(pad.lx) - kStickCenter;
-        int ly = static_cast<int>(pad.ly) - kStickCenter;
-        int joyx = (lx > kDeadzone) ? 1 : (lx < -kDeadzone) ? -1 : 0;
-        int joyy = (ly > kDeadzone) ? 1 : (ly < -kDeadzone) ? -1 : 0;
-        if (pad.down(pico_toolset::kBtLeft)) joyx = -1;
-        else if (pad.down(pico_toolset::kBtRight)) joyx = 1;
-        if (pad.down(pico_toolset::kBtUp)) joyy = -1;
-        else if (pad.down(pico_toolset::kBtDown)) joyy = 1;
-        g_prev_joy_x = joyx;
-        g_prev_joy_y = joyy;
-        g_prev_joy_buttons = static_cast<uint8_t>((pad.down(pico_toolset::kBtA) ? 1 : 0) |
-                                                   (pad.down(pico_toolset::kBtB) ? 2 : 0) |
-                                                   (pad.down(pico_toolset::kBtX) ? 4 : 0) |
-                                                   (pad.down(pico_toolset::kBtY) ? 8 : 0));
+        // Same derivation I_StartTic() uses, so the next ev_joystick edge compares against reality.
+        const Joy j = joystick_from(pad);
+        g_prev_joy_x = j.x;
+        g_prev_joy_y = j.y;
+        g_prev_joy_buttons = j.buttons;
     }
 
     g_prev_connected = hid.connected_keyboard_count() > 0;
 }
 
-#ifdef PICODOOM_PRESTO
+#ifdef PICODOOM_DEFERRED_VIDEO_COPY
 extern "C" void presto_video_poll(void); // src/i_video_presto.cpp
 #endif
 
 extern "C" void I_StartTic(void)
 {
-#ifdef PICODOOM_PRESTO
+#ifdef PICODOOM_DEFERRED_VIDEO_COPY
     presto_video_poll(); // finishes a pending beam-synchronised frame copy (engine idle time)
 #endif
     // Pico-specific runtime tuning (serial console, src/i_serial_console.cpp)
@@ -320,44 +336,9 @@ extern "C" void I_StartTic(void)
         }
 
         if (pad.present) {
-            // doom/d_event.h's ev_joystick: data1 bits 0-3 = joyarray[0..3]
-            // (doom/g_game.c's joybuttons[], mapped via joyb_fire/joyb_strafe/
-            // joyb_speed/joyb_use -- default indices 0/1/2/3, doom/m_misc.c),
-            // data2/data3 = x/y. G_Responder/G_BuildTiccmd (and m_menu.c's
-            // menu navigation) only ever compare these to 0 (joyxmove < 0 /
-            // > 0) -- no magnitude, so a plain -1/0/1 sign is both correct
-            // and sufficient; no analog turning-speed curve to tune here.
-            constexpr int kStickCenter = 128;
-            constexpr int kDeadzone = 40; // out of 128 each direction from center
-            int lx = static_cast<int>(pad.lx) - kStickCenter;
-            // NOT inverted -- pico_toolset::UsbHidHost::gamepad_state()'s
-            // documented convention is "high ly = down", matching this
-            // reading directly. An apparent inversion here (real-hardware
-            // finding, 2026-09) turned out to be a real Pico-Toolset bug
-            // instead: scale_axis() could silently wrap at one extreme of
-            // an XInput stick's range (see that component's usb_hid_host.cpp),
-            // which reads as a sign error at large deflection but is
-            // actually non-monotonic overflow -- inverting the reading here
-            // "fixed" small deflections while making large ones worse.
-            // Checked first for the ARM/x86 char-signedness class of bug this
-            // project hit before (docs/PLAN.md) -- ruled out: this whole path
-            // uses uint8_t/int16_t throughout, no plain `char` anywhere.
-            int ly = static_cast<int>(pad.ly) - kStickCenter;
-            int joyx = (lx > kDeadzone) ? 1 : (lx < -kDeadzone) ? -1 : 0;
-            int joyy = (ly > kDeadzone) ? 1 : (ly < -kDeadzone) ? -1 : 0;
-            // D-pad overrides the stick when held -- it's inherently digital,
-            // no deadzone judgment call needed.
-            if (pad.down(pico_toolset::kBtLeft)) joyx = -1;
-            else if (pad.down(pico_toolset::kBtRight)) joyx = 1;
-            if (pad.down(pico_toolset::kBtUp)) joyy = -1;
-            else if (pad.down(pico_toolset::kBtDown)) joyy = 1;
-
-            // A/B/X/Y -> fire/strafe/run/use, matching m_misc.c's default
-            // joyb_fire=0/joyb_strafe=1/joyb_speed=2/joyb_use=3 bindings.
-            uint8_t buttons = static_cast<uint8_t>((pad.down(pico_toolset::kBtA) ? 1 : 0) |
-                                                    (pad.down(pico_toolset::kBtB) ? 2 : 0) |
-                                                    (pad.down(pico_toolset::kBtX) ? 4 : 0) |
-                                                    (pad.down(pico_toolset::kBtY) ? 8 : 0));
+            const Joy j = joystick_from(pad);
+            const uint8_t buttons = j.buttons;
+            const int joyx = j.x, joyy = j.y;
 
             if (buttons != g_prev_joy_buttons || joyx != g_prev_joy_x || joyy != g_prev_joy_y) {
                 event_t ev;

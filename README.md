@@ -138,7 +138,6 @@ toggle it (connecting a headset unmutes).
 
 Pico-specific tuning lives in the serial console (type `help`):
 - `gamma [up|down|<0.1-10>]` — brightness
-- `pclk [up|down|<hz>]` — SPI pixel clock (SPI LCD builds only)
 - `mouse [on|off]`, `sens [up|down|<0-9>]` — mouse input and sensitivity
 
 # License

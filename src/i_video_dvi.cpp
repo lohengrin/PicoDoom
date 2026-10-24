@@ -2,7 +2,7 @@
 // variant, see docs/HDMI_PLAN.md): drives DOOM's 320x200 palette-indexed
 // screens[0] out the Waveshare RP2350-PiZero's onboard TMDS connector via
 // Pico-Toolset's pico_toolset_dvi_hdmi, instead of the external ILI9486 SPI
-// LCD src/i_video_ili9486.cpp drives. Selected at configure time
+// LCD src/i_video_spi_lcd.cpp drives. Selected at configure time
 // (PICODOOM_VIDEO_OUTPUT=hdmi, CMakeLists.txt) -- mutually exclusive with
 // that file, never built together.
 //
@@ -61,7 +61,7 @@
 // -- same border layout TOM6809 settled on, just produced differently.
 //
 // screens[0] itself is never relocated here either -- same invariant
-// src/i_video_ili9486.cpp's header comment documents (R_InitBuffer()'s
+// src/i_video_spi_lcd.cpp's header comment documents (R_InitBuffer()'s
 // cached row pointers, st_stuff.c's diff-redraw, f_wipe.c's melt effect all
 // assume stable address/content across frames) -- just read out every
 // I_FinishUpdate() call.
@@ -92,6 +92,7 @@ extern "C" {
 #include "pico_toolset/psram.h"
 #include "i_video_dvi.hpp"
 #include "i_frame_stats.hpp"
+#include "i_video_gamma.hpp"
 
 extern "C" {
 #include "doomdef.h"
@@ -112,7 +113,7 @@ extern "C" {
 #include "pico/time.h"
 
 // Linker-provided symbols (pico-sdk's memmap linker script) -- same stats
-// use as src/i_video_ili9486.cpp.
+// use as src/i_video_spi_lcd.cpp.
 extern "C" char __StackLimit;
 extern "C" char __bss_end__;
 
@@ -154,46 +155,31 @@ uint16_t g_rgb565_lut[256];
 // Gamma factor applied at RGB565-LUT-build time (set from the serial
 // console, src/i_serial_console.cpp; F3/F4 keys that used to tune it are
 // freed for vanilla DOOM) -- same live-tunable brighten/darken curve the LCD
-// build has (src/i_video_ili9486.cpp), for the DVI/HDMI path. Defaults to
+// build has (src/i_video_spi_lcd.cpp), for the DVI/HDMI path. Defaults to
 // 1.4 (a slight brighten -- gammatable[usegamma]'s + gamma table reads a bit
 // dark on the LCD panel; kept as the baseline here too, and FDIV/FPU
 // cost is trivial since it only runs on LUT rebuilds, never per pixel).
 // Pressing down to exactly 1.0 engages an identity fast path in
 // rebuild_rgb565_lut() so an uncorrected palette is byte-identical to the
 // pre-gamma build.
-float g_gamma = 1.4f;
+picodoom::GammaPalette g_pal;
 // Raw PLAYPAL byte data from the last I_SetPalette() -- kept so a serial
 // 'gamma' command can rebuild the LUT at a new factor without the engine
 // re-handing the palette over. Core0-only, same ownership as the LCD
 // build's copy.
-byte g_palette_cache[256 * 3];
 
-// Core0-only (see g_gamma/g_palette_cache above). Same rebuild-on-demand
-// design as src/i_video_ili9486.cpp's rebuild_rgb565_lut(): runs the cached
+// Core0-only (see g_pal above). Same rebuild-on-demand
+// design as src/i_video_spi_lcd.cpp's rebuild_rgb565_lut(): runs the cached
 // raw palette through gamma + gammatable[usegamma] into the native-endian
 // RGB565 LUT I_FinishUpdate() indexes per pixel. Rebuilt wholesale on every
 // I_SetPalette() and every serial 'gamma' change -- 256 entries, one-time
 // cost, not per frame.
 void rebuild_rgb565_lut() {
     for (int i = 0; i < 256; ++i) {
-        byte r = gammatable[usegamma][g_palette_cache[i * 3 + 0]];
-        byte g = gammatable[usegamma][g_palette_cache[i * 3 + 1]];
-        byte b = gammatable[usegamma][g_palette_cache[i * 3 + 2]];
-        if (g_gamma != 1.0f) {
-            // Per-channel power curve (v/255)^(1/gamma): gamma > 1
-            // brightens, < 1 darkens. (v/255) only round-trips exactly
-            // through float for v divisible by 255, hence the identity fast
-            // path -- at gamma 1.0 we skip the divide-and-back entirely
-            // rather than perturb the palette with float rounding.
-            const float inv = 1.0f / g_gamma;
-            r = static_cast<byte>(255.0f * powf(r / 255.0f, inv) + 0.5f);
-            g = static_cast<byte>(255.0f * powf(g / 255.0f, inv) + 0.5f);
-            b = static_cast<byte>(255.0f * powf(b / 255.0f, inv) + 0.5f);
-        }
         // Native-endian RGB565 -- no SPI-wire byte-swap needed here, unlike
-        // src/i_video_ili9486.cpp's LUT (this encoder reads native uint32
+        // src/i_video_spi_lcd.cpp's LUT (this encoder reads native uint32
         // words, see encode_row()).
-        g_rgb565_lut[i] = static_cast<uint16_t>(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+        g_rgb565_lut[i] = picodoom::GammaPalette::rgb565(g_pal.color(i));
     }
 }
 
@@ -215,7 +201,7 @@ int g_row = 0;
 bool g_border_painted = false;
 
 // --- Stats line (SRAM/PSRAM usage, FPS, convert time) ---
-// Same intent as src/i_video_ili9486.cpp's stats line, trimmed: there's no
+// Same intent as src/i_video_spi_lcd.cpp's stats line, trimmed: there's no
 // core0<->core1 handoff/backpressure left to report (core1 free-runs,
 // never blocks core0), so this only tracks core0's own convert cost.
 uint64_t g_last_frame_start_us = 0;
@@ -352,7 +338,7 @@ void I_ShutdownGraphics(void) {}
 // 'gamma' command can rebuild the LUT, see rebuild_rgb565_lut()) and applies
 // gamma + gammatable[usegamma] via that same helper.
 void I_SetPalette(byte* palette) {
-    memcpy(g_palette_cache, palette, sizeof(g_palette_cache));
+    g_pal.set_palette(palette);
     rebuild_rgb565_lut();
 }
 
@@ -406,19 +392,13 @@ void I_ReadScreen(byte* scr) {
 // next I_FinishUpdate(); the value is echoed to the serial console, same
 // pattern as the LCD build. The setter clamps to [0.1, 10].
 float i_video_gamma(void) {
-    return g_gamma;
+    return g_pal.gamma();
 }
 
 void i_video_set_gamma(float gamma) {
-    constexpr float kMinGamma = 0.1f;
-    constexpr float kMaxGamma = 10.0f;
-    g_gamma = gamma;
-    if (g_gamma < kMinGamma)
-        g_gamma = kMinGamma;
-    else if (g_gamma > kMaxGamma)
-        g_gamma = kMaxGamma;
+    g_pal.set_gamma(gamma);
     rebuild_rgb565_lut();
-    printf("PicoDoom: gamma %.2f\n", g_gamma);
+    printf("PicoDoom: gamma %.2f\n", g_pal.gamma());
 }
 
 // I_StartTic lives in src/i_input_usbhid.cpp.

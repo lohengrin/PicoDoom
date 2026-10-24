@@ -5,7 +5,7 @@
 namespace {
 // Core0-only, single-writer-per-field (d_main.c/r_main.c write, one video
 // backend's report_stats_if_due() reads+resets) -- plain accumulators, same
-// convention as e.g. i_video_st7796.cpp's g_wait_us_in_window.
+// convention as e.g. i_video_spi_lcd.cpp's g_wait_us_in_window.
 uint64_t g_tic_us = 0;
 uint64_t g_draw2d_us = 0;
 uint64_t g_bsp_walls_us = 0;

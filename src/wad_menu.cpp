@@ -29,7 +29,7 @@
 #include "pico_toolset/psram.h"
 #include "pico_toolset/sdcard.h"
 #include "hid_source.hpp"
-#if !defined(PICODOOM_HDMI) && !defined(PICODOOM_PRESTO)
+#ifdef PICODOOM_SPI_LCD
 #include "pico_toolset/display_panel.h"
 #include "pico_toolset/xpt2046.h"
 #include "pico_toolset/xpt2046_configs.h"
@@ -46,7 +46,7 @@
 
 // -- external phone-home points (all defined in other src/ TUs) ------------
 extern "C" {
-void I_InitGraphics(void); // i_video_ili9486.cpp / i_video_dvi.cpp (once-guarded)
+void I_InitGraphics(void); // i_video_spi_lcd.cpp / i_video_dvi.cpp (once-guarded)
 void i_input_reset_menu_input(void); // i_input_tic.cpp (edge-latch re-baseline)
 #if defined(PICODOOM_PRESTO)
 void lvgl_display_presto_init(void); // lvgl_display_presto.cpp
@@ -56,13 +56,13 @@ void presto_bt_forget_all(void);
 void presto_audio_start_pairing(void);
 void presto_audio_forget(void);
 const char* presto_bt_status(void);
-#elif !defined(PICODOOM_HDMI)
+#elif defined(PICODOOM_SPI_LCD)
 // DisplayPanel&, not the concrete Ili9486/St7796 -- this menu only needs
 // the shared windowed/DMA-streaming contract (see display_panel.h), so it
 // works unchanged for either LCD panel this project supports (see
-// src/i_video_ili9486.cpp / src/i_video_st7796.cpp, whichever is compiled
+// src/i_video_spi_lcd.cpp, whichever is compiled
 // in for this build's PICODOOM_VIDEO_OUTPUT).
-pico_toolset::DisplayPanel& i_video_lcd_display(void); // i_video_ili9486.cpp / i_video_st7796.cpp
+pico_toolset::DisplayPanel& i_video_lcd_display(void); // i_video_spi_lcd.cpp
 void lvgl_display_lcd_init(void); // lvgl_display_lcd.cpp
 void lvgl_indev_init_touch(pico_toolset::Xpt2046Touch& touch); // lvgl_indev.cpp
 #else
@@ -177,7 +177,7 @@ extern "C" bool wad_menu_run(bool sd_available)
     lv_display_t* disp = nullptr;
 #if defined(PICODOOM_PRESTO)
     lvgl_display_presto_init();
-#elif !defined(PICODOOM_HDMI)
+#elif defined(PICODOOM_SPI_LCD)
     lvgl_display_lcd_init();
 #else
     lvgl_display_dvi_init();
@@ -338,8 +338,8 @@ extern "C" bool wad_menu_run(bool sd_available)
         lv_group_add_obj(group, reboot_btn);
     }
 
-#ifndef PICODOOM_HDMI
-    // LCD builds: "High res" (480x300 vs 320x200) toggle, bottom-left on the
+#ifdef PICODOOM_RUNTIME_RES
+    // Runtime-resolution builds: "High res" (480x300 vs 320x200) toggle, bottom-left on the
     // same baseline/font as the hint text. Meaningless without a uSD card
     // (the menu only offers Reboot then), so hidden in that mode.
     lv_obj_t* hires_cb = nullptr;
@@ -403,7 +403,7 @@ extern "C" bool wad_menu_run(bool sd_available)
     lvgl_indev_init_mouse(i_input_hid(), hor_res, ver_res);
 #if defined(PICODOOM_PRESTO)
     lvgl_indev_init_touch_ft6236();
-#elif !defined(PICODOOM_HDMI)
+#elif defined(PICODOOM_SPI_LCD)
     // Xpt2046Touch must outlive the pump loop -- touch_read_cb dereferences
     // the pointer we hand to lvgl_indev_init_touch on every LVGL tick.
     pico_toolset::Xpt2046Touch touch;
@@ -476,7 +476,7 @@ extern "C" bool wad_menu_run(bool sd_available)
     // doesn't fire into the first gameplay tics.
     i_input_reset_menu_input();
 
-#ifndef PICODOOM_HDMI
+#ifdef PICODOOM_RUNTIME_RES
     // Read before either exit path deletes the screen; applied by the caller
     // (src/PicoDoom.cpp) once wad_menu_run() returns.
     if (hires_cb != nullptr) {

@@ -65,19 +65,25 @@ PSRAM, uSD (SPI0), piezo GPIO43, QW/ST I2C0 (QwSTPad 0x21), CYW43 radio used for
   and a status line (passkey for keyboards). Bonded devices reconnect by themselves; pairing starts
   automatically when nothing is bonded. Gamepad button order for Bluetooth pads is a guess upstream
   (`gamepad_raw_buttons()` shows the real usages).
-- **Audio** (`src/i_sound_piezo.cpp`): one PWM voice. SFX = per-sound contour (25 ms windows of
-  zero-crossing pitch + loudness, built at first play), priority-arbitrated; music = MUS sequencer
-  stepped without synthesis (`mus_step`/`mus_lead` in `mus_player.cpp`), lead voice only, preempted
-  by SFX. `doom/s_sound.c` PICO stubs are now gated on `PICODOOM_AUDIO` (hdmi + presto).
+- **Audio** (`src/presto_mixer.cpp`, `src/i_sound_piezo.cpp`): one shared mono mixer (8 DMX voices with
+  linear interpolation/pitch/volume + the MUS synth `mus_render()`), rendered on demand by whichever output is
+  active. **Piezo**: Pico-Toolset's `PiezoPcm` (DMA-paced PWM duty cycle on GPIO43, 44.1 kHz) fed by a 5 ms
+  repeating timer (interrupt context, so long game frames cannot starve it) that keeps ~18 ms queued; the output
+  pauses (pin low) when nothing plays. **Headset**: the A2DP source callback renders the same mixer (below); the
+  piezo timer steps aside while streaming. `render()` has a try-lock so overlapping contexts give silence rather
+  than corruption; game-thread voice/`mus_*` access is inside `pico_toolset::IrqLock`. Fallback if `PiezoPcm`
+  cannot start (no free DMA channel/timer): the original single-voice tone approximation (per-sound contour of
+  25 ms windows of zero-crossing pitch + loudness, music as the MUS sequencer's lead voice via `mus_step`/
+  `mus_lead`). `doom/s_sound.c` PICO stubs are gated on `PICODOOM_AUDIO` (hdmi + presto). Muted at start;
+  BOOTSEL toggles (`pico_toolset::bootsel_pressed()`), a streaming headset unmutes.
 - **Bluetooth audio (A2DP)** (`src/presto_a2dp.cpp`, `-DPICODOOM_PRESTO_A2DP=ON` default): when a headset is
   *streaming*, `i_sound_piezo.cpp` stops the piezo and the real audio goes there. There is **no buffer**: the SBC
   encoder asks `DoomSource::fill()` (BTstack context, preempts the game thread) for each frame of PCM and `fill()`
-  mixes it on the spot -- 8 DMX voices (mono, linear interpolation, `presto_pcm_*`), `mus_render()` for music and the
-  connect chime. (An earlier design pumped a PSRAM ring once per frame from `I_SubmitSound()`; any frame longer
+  renders the shared mixer on the spot plus the connect chime. (An earlier design pumped a PSRAM ring once per frame from `I_SubmitSound()`; any frame longer
   than the ring's ~58 ms starved it -> audible cuts, and it added that latency.) Game-thread access to voices and
   to every `mus_*` call is wrapped in a short interrupt-off `IrqLock` so the Bluetooth context never sees a
   half-updated state; mixing buffers are static (the BT context runs on core 0's 4 KB stack). BOOTSEL mute =
-  `presto_a2dp_set_enabled(false)` (silence, music not rendered). SBC preset `Mono` (154 kbps). The last headset
+  `presto_mixer_set_enabled(false)` (silence, music not rendered). SBC preset `Mono` (154 kbps). The last headset
   reconnects after boot; the boot menu has Pair/Forget buttons for pad/keyboard and for audio and a combined status
   line. A headset starting to stream unmutes. Costs ~36 KB SRAM (AVDTP/AVRCP pools, 1 KB ACL buffers,
   `PICO_STACK_SIZE=0x1000`; core1 stack 6 KB; `states[]`/`mobjinfo[]` relocation pays it back, heap ~315 KB).
@@ -120,7 +126,7 @@ handler, and the shared board header onto it — see `pico_toolset_psram`/
 `pico_toolset_sdcard`/`pico_toolset_fault_handler` and their headers under
 `third_party/pico-toolset/components/`/`libs/`. Phase 2 (done) moved the ILI9486
 display and USB-HID keyboard/mouse input onto `pico_toolset_ili9486`/
-`pico_toolset_usb_hid` too — `src/i_video_ili9486.cpp` now drives `pico_toolset::Ili9486`
+`pico_toolset_usb_hid` too — `src/i_video_spi_lcd.cpp` now drives `pico_toolset::Ili9486`
 directly (no more `src/Ili9486Display.*`), and `src/i_input_usbhid.cpp` owns core1 itself
 (launching it, then calling `pico_toolset::UsbHidHost::init()` with
 `configs::usb_hid::kWaveshareRp2350PiZeroLcdManualCore1`, `run_on_core1=false`) so that
@@ -165,6 +171,15 @@ cmake --build build -j$(nproc)   # → build/PicoDoom.uf2
   C11, so `CMAKE_C_STANDARD=11` globally and per-file `-std=gnu90` for every `DOOMSRC`
   file except `d_main.c` (which includes SDK headers). Keep that split in CMakeLists.txt.
 
+### Variant identity vs capabilities
+`PICODOOM_HDMI` / `_ST7796` / `_ILI9486` / `_PRESTO` (set per `PICODOOM_VIDEO_OUTPUT` in `CMakeLists.txt`) are for code that is
+really per-board (clocks, pins, board config). Everything else tests a **capability** macro, so a new board only has to
+say what it has: `PICODOOM_SPI_LCD` (SPI panel via `DisplayPanel` + XPT2046 touch + USB host on core1),
+`PICODOOM_RUNTIME_RES` (runtime 320x200/480x300, `screens[0]` in SRAM), `PICODOOM_DEFAULT_HIRES` (0/1),
+`PICODOOM_INFO_IN_PSRAM` (`states[]`/`mobjinfo[]` in PSRAM, `doom/info.c`), `PICODOOM_DEFERRED_VIDEO_COPY`
+(`presto_video_poll()`/`presto_video_flush()` hooks), `PICODOOM_VIDEO_OWNS_SCREEN0`, `PICODOOM_AUDIO`. Add a macro there
+instead of another `!defined(PICODOOM_HDMI)`.
+
 ## Doom port architecture: the `i_*` platform layer
 
 The engine calls the platform through small interfaces (see `doom/i_*.h`). The classic
@@ -174,7 +189,7 @@ Linux `doom/` tree provides X11 implementations; this port replaces them per-fil
 |------|--------------|-----------|
 | `i_main.c` | `main()` → `D_DoomMain()` | not linked; `src/PicoDoom.cpp` is `main` |
 | `i_system.c` | `I_GetTime`/`I_ZoneBase`/`I_Error`/`I_Quit`/`I_Init` | `I_ZoneBase` → PSRAM heap under `#ifdef PICO`; the rest rides the `/linux` syscall shim (`time_us_64`, `usleep`) |
-| `i_video.c`, `i_video_pimoroni.c` | X11 video (`sys/ipc.h`, XShm) | **cannot compile for Pico**; replaced by `src/i_video_ili9486.cpp` (real ILI9486 driver, Phase 2) |
+| `i_video.c`, `i_video_pimoroni.c` | X11 video (`sys/ipc.h`, XShm) | **cannot compile for Pico**; replaced by `src/i_video_spi_lcd.cpp` (real ILI9486 driver, Phase 2) |
 | `i_sound.c`, `i_net.c` | Linux OSS / IPX | not linked; `i_sound_null.c` stub for now, `i_net_null.c` mirrors `i_net.c`'s single-player `doomcom` setup |
 | `i_sound_null.c`, `i_net_null.c` | — | headless bring-up stubs so the engine links |
 | `d_main.c` | `D_DoomMain`, game startup | `#ifdef PICO` (stdio); stray `mkdir("c:\\doomdata",0)` in the `-cdrom` branch is guarded by `#ifndef PICO` |
@@ -199,7 +214,7 @@ so the options menu's volume sliders keep working; it just skips the now-unused
 `channels[]` allocation, which is why every other guarded function must also stay
 guarded (`channels` is NULL under `#ifdef PICO`).
 
-### Video: src/i_video_ili9486.cpp / i_video_st7796.cpp (kept in sync; LCD builds)
+### Video: src/i_video_spi_lcd.cpp (SPI LCD builds: ILI9486 `lcd` and ST7796U `lcd-st7796`, one file)
 - DOOM renderer writes `screens[0]`: 320×200, palette-indexed (indices 0–255).
   **`screens[0]`'s address is never touched by this file** — Phase 4.6 tried
   ping-ponging it directly between two buffers and reverted (Phase 4.6.2,
@@ -324,7 +339,7 @@ LCD driver.
   (int)""}` so clean-quit `M_SaveDefaults()` re-saves it; the menu itself rewrites
   `default.cfg` at select time (replace-or-append) so a power-cut still pre-highlights
   next boot. C90 rules apply in `doom/` — keep to `/* */` comments and K&R style there.
-- **`I_InitGraphics()` is once-guarded** in both `src/i_video_ili9486.cpp` and
+- **`I_InitGraphics()` is once-guarded** in both `src/i_video_spi_lcd.cpp` and
   `src/i_video_dvi.cpp` (the menu calls it first; the second call must be a no-op —
   a DVI re-init would wedge the TMDS lane).
 - **Input exit hygiene**: `i_input_reset_menu_input()` (`src/i_input_usbhid.cpp`) is
@@ -356,7 +371,7 @@ LCD driver.
   can be added without touching the engine.
 - C11 (C standard), C++20 for drivers (needed for `std::span` in `pico_toolset::Ili9486`);
   engine is C → easy `extern "C"` binding, but the *definitions* need `extern "C"`
-  too when they live in a `.cpp` file (see src/i_video_ili9486.cpp), not just the
+  too when they live in a `.cpp` file (see src/i_video_spi_lcd.cpp), not just the
   included header's declarations, or the linker gets C++-mangled symbol names.
 - `doom/r_draw.c`'s column/span drawers (`R_DrawColumn` and friends) cache
   `dc_source`/`dc_colormap`/etc. into locals before their hot loops under
@@ -383,11 +398,12 @@ CMakeLists.txt        # PicoDoom target; DOOMSRC list; Pico-Toolset add_subdirec
 src/PicoDoom.cpp      # bare-metal main(): PSRAM init → sd_init() → D_DoomMain()
 src/sd_stdio.cpp       # uSD mount (pico_toolset::SdCard) + _gettimeofday/usleep
                         # (POSIX stdio syscalls themselves now live in pico_toolset_sdcard)
-src/i_video_ili9486.cpp      # DOOM i_video.h impl: SRAM screens[0] -> hash/skip + LUT convert into SRAM slots ->
-src/i_video_st7796.cpp       # core1 DMA -> pico_toolset::Ili9486 / St7796 (near-identical files; edit both)
+src/i_video_gamma.hpp        # picodoom::GammaPalette: PLAYPAL cache + gammatable/extra gamma curve, shared by every video backend
+src/i_video_spi_lcd.cpp      # DOOM i_video.h impl, both SPI LCD panels (PICODOOM_ST7796 picks St7796, else Ili9486; all via
+                              # DisplayPanel): SRAM screens[0] -> hash/skip + LUT convert into SRAM slots -> core1 DMA
 src/i_video_core1.hpp        # i_video_core1_step(): one band of pending blit work, called from core1
 src/i_video_dvi.cpp          # HDMI build's i_video.h impl (g_framebuf + core1 DVI encoder) +, like
-                              # i_video_ili9486.cpp, an I_InitGraphics() once-guard and the
+                              # i_video_spi_lcd.cpp, an I_InitGraphics() once-guard and the
                               # i_video_dvi_framebuf()/width()/height() menu accessors
 src/i_input_usbhid.cpp       # (now only the USB backend: HidSource adapter, core1 launch; event posting is in
                               # src/i_input_tic.cpp, Presto's backend in src/i_input_presto.cpp)
@@ -410,8 +426,8 @@ src/i_input_usbhid.cpp       # (now only the USB backend: HidSource adapter, cor
                               # spy-mode, doom/m_menu.c + doom/g_game.c) -- the Pico tuning controls
                               # that used to shadow F1-F4/F10-F12 live in the serial console instead
 src/i_serial_console.cpp     # Pico tuning console over the USB CDC (same link as printf, polled
-                              # from I_StartTic()): line-oriented commands gamma/pclk (LCD only)/
-                              # mouse/sens replace the freed F-key intercepts (see i_video_ili9486.cpp,
+                              # from I_StartTic()): line-oriented commands gamma/
+                              # mouse/sens replace the freed F-key intercepts (see i_video_spi_lcd.cpp,
                               # i_video_dvi.cpp, i_input_usbhid.cpp accessors); engine never reads
                               # stdin on Pico, so this owns CDC input exclusively
 src/lv_conf.h              # LVGL config (Phase 6 boot menu): dark theme, Montserrat 14/22/28,

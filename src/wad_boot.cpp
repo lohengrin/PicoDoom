@@ -34,11 +34,7 @@ constexpr const char* kCfgKey = "picodoom_lastwad";
 constexpr const char* kHiresKey = "picodoom_hires";
 // 480x300 by default on the ST7796 panel (faster SPI, bigger screen);
 // ILI9486 keeps the original 320x200.
-#ifdef PICODOOM_ST7796
-constexpr int kHiresDefault = 1;
-#else
-constexpr int kHiresDefault = 0;
-#endif
+constexpr int kHiresDefault = PICODOOM_DEFAULT_HIRES;
 
 // A WAD directory's 8-byte lump-name field is padded with NULs (id's own
 // tools) or spaces (some third-party WADs); FAT-side we can't tell which

@@ -118,7 +118,7 @@ typedef enum
 // divide, so this costs one extra multiply per call over the old constant
 // x3/2. Width alone is enough (not height): both 320x200 and 480x300 are
 // uniform scales of the 320x200 base, so the two axes always agree.
-#ifdef PICODOOM_HDMI
+#ifndef PICODOOM_RUNTIME_RES
 #define UI_SCALE_NUM 1
 #define UI_SCALE_DEN 1
 #define UI_SCALE(v) (((v)*UI_SCALE_NUM)/UI_SCALE_DEN)
@@ -161,7 +161,7 @@ typedef enum
 // alias it (this code builds -fno-strict-aliasing), so it re-loads it every
 // iteration unless you copy it into a local first -- see R_DrawColumn.
 // (hdmi's constant is still folded away as before, so the copy is free there.)
-#ifdef PICODOOM_HDMI
+#ifndef PICODOOM_RUNTIME_RES
 #define MAX_SCREENWIDTH  320
 #define MAX_SCREENHEIGHT 200
 #define SCREENWIDTH  320

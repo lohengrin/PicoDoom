@@ -10,9 +10,6 @@
 //   gamma                show current gamma factor
 //   gamma up|down        +/- 0.1  (clamped [0.1, 10])
 //   gamma <v>            set gamma factor
-//   pclk                 show SPI pixel clock request/actual (LCD build)
-//   pclk up|down         +/- 1 MHz (LCD build)
-//   pclk <hz>            set SPI pixel clock (LCD build)
 //   mouse                show mouse posting state
 //   mouse on|off         enable/disable mouselook posting
 //   sens                 show mouse sensitivity (0-9)
@@ -30,14 +27,9 @@ extern "C" {
 }
 
 extern "C" {
-// src/i_video_ili9486.cpp / src/i_video_dvi.cpp -- gamma factor.
+// src/i_video_*.cpp -- gamma factor.
 float i_video_gamma(void);
 void i_video_set_gamma(float gamma);
-#ifndef PICODOOM_HDMI
-// src/i_video_ili9486.cpp -- SPI pixel clock (DVI has no pixel clock).
-uint32_t i_video_pixel_clock_hz(void);
-void i_video_set_pixel_clock_hz(uint32_t hz);
-#endif
 // src/i_input_usbhid.cpp -- mouselook posting.
 bool i_input_mouse_enabled(void);
 void i_input_set_mouse_enabled(bool enabled);
@@ -54,8 +46,6 @@ constexpr float kGammaMax = 10.0f;
 constexpr float kGammaStep = 0.1f;
 constexpr int kSensMin = 0;
 constexpr int kSensMax = 9;
-constexpr int32_t kPixelClockStepHz = 1'000'000;
-constexpr uint32_t kPixelClockMinHz = 1'000'000;
 constexpr size_t kLineMax = 64;
 
 char g_line[kLineMax];
@@ -64,16 +54,9 @@ bool g_hint_printed = false;
 
 void print_help()
 {
-#ifndef PICODOOM_HDMI
-    printf("PicoDoom: commands: gamma [up|down|<0.1-10>]  "
-           "pclk [up|down|<hz>]  "
-           "mouse [on|off]  "
-           "sens [up|down|<0-9>]  help\n");
-#else
     printf("PicoDoom: commands: gamma [up|down|<0.1-10>]  "
            "mouse [on|off]  "
            "sens [up|down|<0-9>]  help\n");
-#endif
 }
 
 // Turn a null-terminated string into a trimmed token by returning a pointer
@@ -123,35 +106,6 @@ void cmd_gamma(char* args)
         printf("PicoDoom: gamma: clamped to [%.1f..%.1f]\n", kGammaMin, kGammaMax);
     i_video_set_gamma(v);
 }
-
-#ifndef PICODOOM_HDMI
-void cmd_pclk(char* args)
-{
-    char* arg = next_token(&args);
-    if (!arg) {
-        printf("PicoDoom: SPI pixel clock requested=%u Hz\n",
-               (unsigned)i_video_pixel_clock_hz());
-        return;
-    }
-    if (std::strcmp(arg, "up") == 0) {
-        i_video_set_pixel_clock_hz(i_video_pixel_clock_hz() + kPixelClockStepHz);
-        return;
-    }
-    if (std::strcmp(arg, "down") == 0) {
-        uint32_t cur = i_video_pixel_clock_hz();
-        uint32_t next = cur > kPixelClockStepHz ? cur - kPixelClockStepHz : kPixelClockMinHz;
-        i_video_set_pixel_clock_hz(next);
-        return;
-    }
-    char* end;
-    unsigned long v = std::strtoul(arg, &end, 10);
-    if (end == arg || *end != '\0') {
-        printf("PicoDoom: pclk: unknown arg '%s' (use up, down, or <hz>)\n", arg);
-        return;
-    }
-    i_video_set_pixel_clock_hz(static_cast<uint32_t>(v));
-}
-#endif
 
 void cmd_mouse(char* args)
 {
@@ -215,9 +169,6 @@ void process_line(char* line, int len)
         return;
     }
     if (std::strcmp(cmd, "gamma") == 0) { cmd_gamma(rest); return; }
-#ifndef PICODOOM_HDMI
-    if (std::strcmp(cmd, "pclk") == 0) { cmd_pclk(rest); return; }
-#endif
     if (std::strcmp(cmd, "mouse") == 0) { cmd_mouse(rest); return; }
     if (std::strcmp(cmd, "sens") == 0) { cmd_sens(rest); return; }
     printf("PicoDoom: unknown command '%s' -- type 'help' for a list\n", cmd);

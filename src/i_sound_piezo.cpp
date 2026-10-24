@@ -1,31 +1,29 @@
-// Presto sound: one piezo (PWM square wave, Pico-Toolset's pico_toolset_piezo on
-// GPIO43) behind doom/i_sound.h. There is exactly one voice and no PCM, so:
+// Presto sound behind doom/i_sound.h. All the real audio comes from one shared mixer
+// (src/presto_mixer.cpp: 8 DMX voices + the MUS synth, mono) rendered on demand by whichever
+// output is active:
 //
-//  * SFX: each DMX sample is reduced, the first time it is played, to a contour of
-//    25 ms windows (zero-crossing pitch + loudness). Playing a sound steps the
-//    piezo through that contour on wall-clock time, so shots, doors, pickups and
-//    pain/death sounds keep their recognisable pitch movement as chirps. One sound
-//    at a time: a new one replaces the playing one when its priority is at least as
-//    important (DOOM priorities: lower number = more important).
-//  * Music: src/mus_player.cpp's sequencer, stepped without synthesis, lends its
-//    loudest/highest melodic voice to the piezo while no SFX is sounding.
+//  * Bluetooth headset streaming (src/presto_a2dp.cpp): the SBC encoder callback renders it.
+//  * Otherwise the piezo as a PCM output (Pico-Toolset's PiezoPcm on GPIO43: DMA-paced PWM duty
+//    cycle): a 5 ms repeating timer keeps ~18 ms of audio queued, in interrupt context, so long
+//    game frames cannot starve it. The output pauses (pin low) when nothing is playing.
+//  * Fallback if PiezoPcm cannot start (no free DMA channel/timer): the original single-voice
+//    tone approximation -- each DMX sample reduced to a contour of 25 ms windows (zero-crossing
+//    pitch + loudness) stepped on wall-clock time, music as the MUS sequencer's lead voice.
 //
-// While a Bluetooth headset is streaming (src/presto_a2dp.cpp) the piezo stays off and the
-// real samples/music go to the headset instead.
-// Muted by default; the BOOTSEL button toggles mute (polled once per I_SubmitSound()).
-//
-// Everything runs from I_SubmitSound(), which the main loop calls once per iteration
+// Muted by default; the BOOTSEL button toggles mute (polled once per I_SubmitSound()), and a
+// headset starting to stream unmutes. I_SubmitSound() is the main loop's per-iteration hook
 // (I_UpdateSound() is compiled out by SNDSERV -- see src/i_sound_dvi.cpp's note).
+#include "pico_toolset/bootsel.h"
+#include "pico_toolset/irq_lock.h"
 #include "pico_toolset/piezo.h"
 #include "pico_toolset/piezo_configs.h"
+#include "pico_toolset/piezo_pcm.h"
 #include "pico_toolset/psram.h"
 #include "mus_player.hpp"
+#include "presto_mixer.hpp"
 
-#include "hardware/gpio.h"
-#include "hardware/structs/ioqspi.h"
-#include "hardware/structs/sio.h"
-#include "hardware/sync.h"
 #include "pico/time.h"
+#include "pico/types.h"
 
 extern "C" {
 #include "doomdef.h"
@@ -50,33 +48,16 @@ extern "C" {
 #ifdef PICODOOM_A2DP
 bool presto_a2dp_streaming();
 bool presto_a2dp_take_stream_started(); // true once per transition to Streaming
-void presto_a2dp_set_enabled(bool on);
-void presto_a2dp_set_music_volume(int volume);
-bool presto_pcm_start(int handle, const uint8_t* data, uint32_t length, uint32_t rate, int vol, int pitch);
-void presto_pcm_stop(int handle);
-bool presto_pcm_playing(int handle);
-void presto_pcm_update(int handle, int vol);
-void presto_pcm_flush();
 #else
 inline bool presto_a2dp_streaming() { return false; }
 inline bool presto_a2dp_take_stream_started() { return false; }
-inline void presto_a2dp_set_enabled(bool) {}
-inline void presto_a2dp_set_music_volume(int) {}
-inline bool presto_pcm_start(int, const uint8_t*, uint32_t, uint32_t, int, int) { return false; }
-inline void presto_pcm_stop(int) {}
-inline bool presto_pcm_playing(int) { return false; }
-inline void presto_pcm_update(int, int) {}
-inline void presto_pcm_flush() {}
 #endif
 
 namespace {
 
 // The MUS sequencer is shared with the Bluetooth context (presto_a2dp.cpp renders it from the
 // A2DP source callback while streaming), so every mus_* call from the game thread is atomic.
-struct IrqLock {
-    uint32_t flags = save_and_disable_interrupts();
-    ~IrqLock() { restore_interrupts(flags); }
-};
+using pico_toolset::IrqLock;
 
 constexpr int kWindowMs = 25;
 constexpr int kMaxWindows = 80;      // 2 s of contour per sound
@@ -111,6 +92,41 @@ struct SfxVoice {
 
 int g_next_handle = 1;
 
+// PCM piezo output (see the header comment).
+pico_toolset::PiezoPcm g_pcm;
+bool g_pcm_ok = false;
+repeating_timer_t g_pcm_timer;
+constexpr size_t kPcmTargetQueued = 800; // ~18 ms at 44.1 kHz
+
+// Whether SFX/music go through the shared mixer (headset or PCM piezo) rather than the tone fallback.
+bool use_mixer() { return g_pcm_ok || presto_a2dp_streaming(); }
+
+// 5 ms timer, interrupt context: top the PCM ring up from the mixer. Stays out of the way while
+// a headset is streaming (the Bluetooth callback owns the mixer then) and idles the output.
+bool pcm_timer_cb(repeating_timer_t*) {
+    if (presto_a2dp_streaming()) {
+        if (!g_pcm.paused())
+            g_pcm.pause();
+        return true;
+    }
+    const size_t queued = g_pcm.queued();
+    if (!presto_mixer_active()) {
+        if (queued == 0 && !g_pcm.paused())
+            g_pcm.pause(); // pin low: no carrier hiss while silent
+        return true;
+    }
+    static int16_t chunk[kMixerMaxChunk];
+    size_t need = queued < kPcmTargetQueued ? kPcmTargetQueued - queued : 0;
+    while (need > 0) {
+        const int n = static_cast<int>(std::min<size_t>(need, kMixerMaxChunk));
+        if (!presto_mixer_render(chunk, n))
+            break;
+        g_pcm.write(chunk, static_cast<size_t>(n));
+        need -= static_cast<size_t>(n);
+    }
+    return true;
+}
+
 // Last state written to the piezo, to avoid redundant (glitchy) reprogramming.
 bool g_tone_on = false;
 uint32_t g_tone_hz = 0;
@@ -125,22 +141,6 @@ int g_music_volume = 127;
 bool g_muted = true;
 bool g_prev_bootsel = false;
 uint64_t g_bootsel_last_us = 0;
-
-// BOOTSEL shares the flash chip-select line: float it and read it back. Runs from
-// RAM with interrupts off, since flash is unreachable while CS is released (core1
-// executes RAM only on this build, so nothing else touches flash meanwhile).
-bool __no_inline_not_in_flash_func(read_bootsel)() {
-    const uint32_t flags = save_and_disable_interrupts();
-    hw_write_masked(&ioqspi_hw->io[1].ctrl, GPIO_OVERRIDE_LOW << IO_QSPI_GPIO_QSPI_SS_CTRL_OEOVER_LSB,
-                    IO_QSPI_GPIO_QSPI_SS_CTRL_OEOVER_BITS);
-    for (int i = 0; i < 1000; ++i)
-        __asm volatile("nop"); // let the pad settle
-    const bool pressed = !(sio_hw->gpio_hi_in & SIO_GPIO_HI_IN_QSPI_CSN_BITS);
-    hw_write_masked(&ioqspi_hw->io[1].ctrl, GPIO_OVERRIDE_NORMAL << IO_QSPI_GPIO_QSPI_SS_CTRL_OEOVER_LSB,
-                    IO_QSPI_GPIO_QSPI_SS_CTRL_OEOVER_BITS);
-    restore_interrupts(flags);
-    return pressed;
-}
 
 void set_silent() {
     if (g_tone_on) {
@@ -270,8 +270,16 @@ void play_music(uint64_t now_us) {
 extern "C" {
 
 void I_InitSound(void) {
-    g_piezo.init(pico_toolset::configs::piezo::kPimoroniPresto);
-    printf("I_InitSound: piezo on GPIO43 (single voice, contour SFX + lead-voice music; Bluetooth headset takes over when streaming), muted -- BOOTSEL toggles\n");
+    pico_toolset::PiezoPcmConfig pcm_cfg;
+    pcm_cfg.pin = pico_toolset::configs::piezo::kPimoroniPresto.pin;
+    g_pcm_ok = g_pcm.init(pcm_cfg);
+    if (g_pcm_ok) {
+        add_repeating_timer_us(-5000, pcm_timer_cb, nullptr, &g_pcm_timer);
+    } else {
+        g_piezo.init(pico_toolset::configs::piezo::kPimoroniPresto);
+    }
+    printf("I_InitSound: piezo on GPIO43 (%s; a Bluetooth headset takes over when streaming), muted -- BOOTSEL toggles\n",
+           g_pcm_ok ? "PCM: real SFX and music" : "PCM unavailable: single-voice tone fallback");
 }
 
 void I_UpdateSound(void) {}
@@ -280,15 +288,15 @@ void I_SubmitSound(void) {
     const uint64_t now_us = time_us_64();
     if (now_us - g_bootsel_last_us >= 30'000) { // ~30 ms poll doubles as debounce
         g_bootsel_last_us = now_us;
-        const bool pressed = read_bootsel();
+        const bool pressed = pico_toolset::bootsel_pressed();
         if (pressed && !g_prev_bootsel) {
             g_muted = !g_muted;
-            presto_a2dp_set_enabled(!g_muted);
+            presto_mixer_set_enabled(!g_muted);
             printf("PicoDoom: sound %s (BOOTSEL)\n", g_muted ? "muted" : "on");
             if (g_muted) {
                 g_sfx.active = false;
                 g_music_last_us = 0; // no tick catch-up after unmuting
-                presto_pcm_flush();
+                presto_mixer_flush();
                 set_silent();
             }
         }
@@ -296,16 +304,16 @@ void I_SubmitSound(void) {
     }
     if (presto_a2dp_take_stream_started() && g_muted) {
         g_muted = false; // connecting a headset is a deliberate "I want sound"; BOOTSEL mutes again
-        presto_a2dp_set_enabled(true);
+        presto_mixer_set_enabled(true);
         printf("PicoDoom: sound on (headset streaming; BOOTSEL toggles)\n");
     }
     if (g_muted)
         return;
-    if (presto_a2dp_streaming()) { // headset connected: real audio there, piezo off
+    if (use_mixer()) { // PCM piezo (timer) or headset (SBC callback) renders on demand
         g_sfx.active = false;
         g_music_last_us = 0;
         set_silent();
-        return; // the Bluetooth context mixes on demand (presto_a2dp.cpp)
+        return;
     }
     if (g_sfx.active) {
         if (play_sfx(now_us))
@@ -342,13 +350,13 @@ int I_StartSound(int id, int vol, int sep, int pitch, int priority) {
         return -1;
     if (g_muted)
         return -1;
-    if (!presto_a2dp_streaming() && g_sfx.active && priority > g_sfx.priority)
+    if (!use_mixer() && g_sfx.active && priority > g_sfx.priority)
         return -1; // the playing sound matters more
     load_sfx(&S_sfx[id]);
-    if (presto_a2dp_streaming()) {
+    if (use_mixer()) {
         const auto* hdr = static_cast<const DmxHeader*>(S_sfx[id].data);
         const int handle = g_next_handle++;
-        return presto_pcm_start(handle, reinterpret_cast<const uint8_t*>(hdr) + sizeof(DmxHeader),
+        return presto_mixer_start(handle, reinterpret_cast<const uint8_t*>(hdr) + sizeof(DmxHeader),
                                 hdr->sample_count, hdr->sample_rate, vol, pitch)
                    ? handle : -1;
     }
@@ -367,7 +375,7 @@ int I_StartSound(int id, int vol, int sep, int pitch, int priority) {
 }
 
 void I_StopSound(int handle) {
-    presto_pcm_stop(handle);
+    presto_mixer_stop(handle);
     if (g_sfx.active && g_sfx.handle == handle) {
         g_sfx.active = false;
         set_silent();
@@ -375,20 +383,20 @@ void I_StopSound(int handle) {
 }
 
 int I_SoundIsPlaying(int handle) {
-    return (g_sfx.active && g_sfx.handle == handle) || presto_pcm_playing(handle);
+    return (g_sfx.active && g_sfx.handle == handle) || presto_mixer_playing(handle);
 }
 
 void I_UpdateSoundParams(int handle, int vol, int sep, int pitch) {
     (void)sep;
     (void)pitch;
-    presto_pcm_update(handle, vol);
+    presto_mixer_update(handle, vol);
     if (g_sfx.active && g_sfx.handle == handle)
         g_sfx.gain = std::clamp(static_cast<float>(vol) / 127.0f, 0.0f, 1.0f);
 }
 
 void I_InitMusic(void) {}
 void I_ShutdownMusic(void) { IrqLock l; mus_stop(); }
-void I_SetMusicVolume(int volume) { g_music_volume = volume; presto_a2dp_set_music_volume(volume); IrqLock l; mus_set_volume(volume); }
+void I_SetMusicVolume(int volume) { g_music_volume = volume; presto_mixer_set_music_volume(volume); IrqLock l; mus_set_volume(volume); }
 void I_PauseSong(int handle) { (void)handle; IrqLock l; mus_pause(); }
 void I_ResumeSong(int handle) { (void)handle; IrqLock l; mus_resume(); }
 int I_RegisterSong(void* data) { g_song = data; return 1; }

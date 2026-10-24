@@ -293,11 +293,7 @@ default_t	defaults[] =
     {"key_strafe",&key_strafe, KEY_RALT},
     {"key_speed",&key_speed, KEY_RSHIFT},
     {"picodoom_lastwad", (int *) &pico_last_wad, (int) ""},
-#ifdef PICODOOM_ST7796
-    {"picodoom_hires", &pico_hires, 1},
-#else
-    {"picodoom_hires", &pico_hires, 0},
-#endif
+    {"picodoom_hires", &pico_hires, PICODOOM_DEFAULT_HIRES},
 #endif
 
 #ifdef LINUX

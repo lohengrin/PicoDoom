@@ -1155,7 +1155,7 @@ typedef struct
   long			misc1, misc2;
 } state_t;
 
-#ifdef PICODOOM_PRESTO
+#ifdef PICODOOM_INFO_IN_PSRAM
 /* Presto: the live tables sit in PSRAM (info.c, I_RelocateInfoTables()) to free 40 KB of SRAM. */
 extern state_t*	states;
 #else
@@ -1352,7 +1352,7 @@ typedef struct
 
 } mobjinfo_t;
 
-#ifdef PICODOOM_PRESTO
+#ifdef PICODOOM_INFO_IN_PSRAM
 extern mobjinfo_t* mobjinfo;
 extern void I_RelocateInfoTables (void);
 #else
