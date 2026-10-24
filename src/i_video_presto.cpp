@@ -281,7 +281,7 @@ void report_stats_if_due(uint64_t now_us) {
 
     const float fps = static_cast<float>(g_frames_in_window) * 1'000'000.0f / static_cast<float>(elapsed_us);
     const float copy_pct = g_frame_us_in_window
-        ? 100.0f * static_cast<float>(g_copy_us_in_window - g_sync_wait_us_in_window) / static_cast<float>(g_frame_us_in_window) : 0.0f;
+        ? 100.0f * static_cast<float>(g_copy_us_in_window) / static_cast<float>(g_frame_us_in_window) : 0.0f;
     const float sync_pct = g_frame_us_in_window
         ? 100.0f * static_cast<float>(g_sync_wait_us_in_window) / static_cast<float>(g_frame_us_in_window) : 0.0f;
 
