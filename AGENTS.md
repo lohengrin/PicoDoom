@@ -31,70 +31,12 @@ A Raspberry Pi **Pico 2 (RP2350)** port of DOOM.
 
 ## Presto variant (Pimoroni Presto, RP2350B)
 
-`cmake -S . -B build-presto -DPICODOOM_VIDEO_OUTPUT=presto [-DPICODOOM_PRESTO_MODE=scanline|palette]
-[-DPICODOOM_PRESTO_BT_CLASSIC=ON|OFF]` (board `pimoroni_presto` from the SDK, defines `PICODOOM_PRESTO`,
-`PICODOOM_AUDIO`, `PICO_FLASH_ASSUME_CORE1_SAFE`; `PICODOOM_PRESTO_PALETTE` in palette mode). Install
-name `PicoDoom-presto-<mode>-<type>`. Hardware: 480x480 ST7701 RGB-parallel panel, FT6236 touch, 8 MB
-PSRAM, uSD (SPI0), piezo GPIO43, QW/ST I2C0 (QwSTPad 0x21), CYW43 radio used for **Bluetooth only**.
-`-DPICODOOM_PRESTO_SYSCLK_MHZ=` (default 264, hardware-verified, 35 FPS; 150 = SDK stock: flash QMI div 2, PSRAM at clk_sys/2 = 132 MHz, CYW43 PIO SPI divider `ceil(sys/75)`; 150 = SDK stock with PSRAM at the toolset's 50 MHz). If a board won't boot or PSRAM fails its self-test, rebuild with 200 or 150.
-
-- **Video** (`src/i_video_presto.cpp`): the game fills the top **480x300** (full width), the lower
-  180 lines are a black band (`St7701Config::visible_height`, no memory behind it). 320x200 is scaled
-  1.5x nearest, 480x300 is native ("High res" boot checkbox, as on the LCD builds; default low-res =
-  tear-free). The RGB bus has no GRAM, so the panel reads SRAM continuously (PSRAM cannot feed it):
-  - `scanline` (default): `Scanline565`, no framebuffer; core1 runs `scanline_task()` and the RAM
-    callback converts one source line per panel line through the 256-entry RGB565 LUT. Low-res reads
-    a 64 KB copy of `screens[0]` taken in `I_FinishUpdate` (tears only during the ~0.2 ms copy);
-    hi-res scans a full 480x300 copy of `screens[0]` made each frame (allocated at the first level frame, after `screens[0]`, from the contiguous heap top; if SRAM is ever short it falls back to the bottom-anchored 3D-view rows and scans the rest live). That copy needs the 40 KB freed by relocating `states[]`/`mobjinfo[]` to PSRAM (`PICODOOM_PRESTO` in `doom/info.c`, `I_RelocateInfoTables()` called from `main()`; they are written only by G_Fast parms). Watch `late-lines`/`missed-frames` in the stats line.
-  - `palette`: `Palette8`, 480x300 byte framebuffer (144 KB) + the panel PIO's hardware palette
-    (`I_SetPalette` -> `set_palette_colour`). Hi-res: with the SRAM freed by the `states[]`/`mobjinfo[]` relocation, `screens[0]` is a separate 144 KB buffer copied into the framebuffer once per frame (tear-free but for the ~0.3 ms copy); only if the heap is too short does it fall back to `screens[0]` *being* the framebuffer (V_Init hook `i_video_presto_screen0`; zero copy, tears); low-res expands 1.5x into it per frame. The black band shows palette
-    entry 0, so pain/pickup flashes tint it.
-  - A full RGB565 framebuffer (288-450 KB) does not fit next to the engine; not offered.
-  - core1 only serves scanout (IRQs + `scanline_task`), all from RAM -- required because Bluetooth
-    bonding erases/programs flash from core0 (`PICO_FLASH_ASSUME_CORE1_SAFE=1`, no
-    multicore_lockout, see the toolset AGENTS.md). Never put flash/PSRAM-touching code on core1.
-  - The LVGL boot menu renders (core0) into an RGB332 480x300 surface scanned out like the game
-    (`lvgl_display_presto.cpp`): the palette-mode framebuffer, or a temporary 144 KB buffer in
-    scanline mode that `i_video_lcd_set_hires()` frees before the engine allocates `screens[0]`.
-- **Beam-synchronised copies** (deferred): every per-frame copy (scanline low/hi-res, palette double buffer / 1.5x expand) runs only while `St7701::display_row()` >= 300, i.e. the beam is on the black band/porches where nothing is read from the buffer; a top-to-bottom copy started there stays ahead of the next frame's beam, so there is no seam (~40% of each ~8 ms frame is such a window; refresh = dot clock / 264k, dot clock = clk_sys/even divider, cap 34 MHz). `I_FinishUpdate()` only *requests* the copy; `presto_video_poll()` (called first thing in `I_StartTic()`, which the engine polls in a tight loop while idling for the next tic) performs it when the beam gets there, and `presto_video_flush()` (top of `D_Display()`, the only place that draws; `doom/d_main.c` shim) blocks if it still is not done. Stats field `beam-sync-wait` = time spent in that blocking wait (should now be small).
-- **Input**: `HidSource` (Pico-Toolset `pico_toolset/hid_source.h`, re-exported by `src/hid_source.hpp`, with `UsbHidSource` / `BluetoothHidSource` adapters) is the backend-neutral input view; shared event
-  posting is `src/i_input_tic.cpp` (`I_StartTic`), backends are `i_input_usbhid.cpp` (PiZero) and
-  `i_input_presto.cpp` (Bluetooth HID via `pico_toolset_bluetooth_hid` + QwSTPad D-pad/A/B/X/Y/+/-;
-  QwSTPad is pad 0 and ORs into a Bluetooth pad). Pad Start (QwSTPad +) posts Esc, Back (-) posts Tab,
-  on every backend. Touch = FT6236 indev for the boot menu, which also has Pair BT / Forget buttons
-  and a status line (passkey for keyboards). Bonded devices reconnect by themselves; pairing starts
-  automatically when nothing is bonded. Gamepad button order for Bluetooth pads is a guess upstream
-  (`gamepad_raw_buttons()` shows the real usages).
-- **Audio** (`src/presto_mixer.cpp`, `src/i_sound_piezo.cpp`): one shared mono mixer (toolset `SampleMixer<8>` for the 8 DMX voices with
-  linear interpolation/pitch/volume + the MUS synth `mus_render()`), rendered on demand by whichever output is
-  active. **Piezo**: Pico-Toolset's `PiezoPcm` (DMA-paced PWM duty cycle on GPIO43, 44.1 kHz) fed by a 5 ms
-  repeating timer (interrupt context, so long game frames cannot starve it) that keeps ~18 ms queued; the output
-  pauses (pin low) when nothing plays. **Headset**: the A2DP source callback renders the same mixer (below); the
-  piezo timer steps aside while streaming. `render()` has a try-lock so overlapping contexts give silence rather
-  than corruption; game-thread voice/`mus_*` access is inside `pico_toolset::IrqLock`. Fallback if `PiezoPcm`
-  cannot start (no free DMA channel/timer): the original single-voice tone approximation (per-sound contour of
-  25 ms windows of zero-crossing pitch + loudness, music as the MUS sequencer's lead voice via `mus_step`/
-  `mus_lead`). Production is paced at the sample rate from the 5 ms timer (PiezoPcm only learns the DMA read position every 10 ms and wipes the ring on an underrun, so topping up from `queued()` loses audio). Level: the piezo is nearly deaf below ~500 Hz and DOOM's audio is bass-heavy, so the timer applies a first-difference treble boost (`piezo pre`, default on) then `g_pcm_gain` (default 50; 100 verified audible: heavy clipping, rough -- smarter processing, e.g. band-pass before the clip, is a later idea) with a hard clip. Console: `piezo beep [hz [ms]]` (full-scale square through the same path -- note it ignores gain/pre), `piezo gain [n]`, `piezo pre [on|off]`, `piezo diag on|off`. `doom/s_sound.c` PICO stubs are gated on `PICODOOM_AUDIO` (hdmi + presto). Muted at start;
-  BOOTSEL toggles (`pico_toolset::bootsel_pressed()`), a streaming headset unmutes.
-- **Bluetooth audio (A2DP)** (`src/presto_a2dp.cpp`, `-DPICODOOM_PRESTO_A2DP=ON` default): when a headset is
-  *streaming*, `i_sound_piezo.cpp` stops the piezo and the real audio goes there. There is **no buffer**: the SBC
-  encoder asks `DoomSource::fill()` (BTstack context, preempts the game thread) for each frame of PCM and `fill()`
-  renders the shared mixer on the spot plus the connect chime. (An earlier design pumped a PSRAM ring once per frame from `I_SubmitSound()`; any frame longer
-  than the ring's ~58 ms starved it -> audible cuts, and it added that latency.) Game-thread access to voices and
-  to every `mus_*` call is wrapped in a short interrupt-off `IrqLock` so the Bluetooth context never sees a
-  half-updated state; mixing buffers are static (the BT context runs on core 0's 4 KB stack). BOOTSEL mute =
-  `presto_mixer_set_enabled(false)` (silence, music not rendered). SBC preset `Mono` (154 kbps). The last headset
-  reconnects after boot; the boot menu has Pair/Forget buttons for pad/keyboard and for audio and a combined status
-  line. A headset starting to stream unmutes. Costs ~36 KB SRAM (AVDTP/AVRCP pools, 1 KB ACL buffers,
-  `PICO_STACK_SIZE=0x1000`; core1 stack 6 KB; `states[]`/`mobjinfo[]` relocation pays it back, heap ~315 KB).
-  Bluetooth mice work through the same HID path (motion, buttons, wheel = weapon cycle; the menu cursor shows only
-  while a mouse is present). Console diagnostics every 5 s while streaming (`PicoDoom: audio: ...`).
-- **LEDs** (`src/i_leds_presto.cpp`, 7 WS2812 on PIO0 SM3): health gradient green(>=100%)->orange(50%)->red(0%) at 25% brightness; 450 ms flashes red (health down), green (health up), blue (any other gain: ammo/armour/weapon/key/power-up). Driven by diffing `players[consoleplayer]` from `i_input_backend_poll()` -- no engine edits; dark outside a level. `i_leds_init()` must run before `cyw43_arch_init()` (PIO0 gpio_base 16).
-- **SRAM** (520 KB): engine statics ~215 KB incl. Bluetooth (~18 KB without lwIP/mbedtls, thanks to
-  `PICO_TOOLSET_BLUETOOTH_NO_WIFI`) -> ~300 KB heap. No blit slots here (the RGB bus needs none).
-- **Hardware checkpoints** (verify in order, per feedback_phased_hardware_rollout): 1) menu appears,
-  touch works, both modes; 2) E1M1 renders in lo/hi res, record FPS/late-lines; 3) QwSTPad plays,
-  BLE keyboard + Classic gamepad pair/reconnect, no hang during bonding; 4) piezo SFX/music.
+Full reference: **[docs/PRESTO.md](docs/PRESTO.md)**. In short: `-DPICODOOM_VIDEO_OUTPUT=presto` (board `pimoroni_presto`,
+build dir `build-presto/`), 480x480 ST7701 RGB panel scanned out of SRAM by PIO+DMA with the game in the top 480x300
+(`-DPICODOOM_PRESTO_MODE=scanline|palette`), FT6236 touch, Bluetooth HID (keyboard/mouse/gamepad) + QwSTPad, sound on the
+piezo (PCM) or a Bluetooth headset (A2DP), health-driven WS2812 LEDs, 264 MHz by default. Key rules: core1 runs only
+RAM code (Bluetooth bonding writes flash from core0); never put a big per-frame buffer in PSRAM; frame copies are
+beam-synchronised; the engine's `states[]`/`mobjinfo[]` live in PSRAM to free SRAM. Hardware-verified.
 
 ## Key reference project (read this first)
 
@@ -214,85 +156,12 @@ so the options menu's volume sliders keep working; it just skips the now-unused
 `channels[]` allocation, which is why every other guarded function must also stay
 guarded (`channels` is NULL under `#ifdef PICO`).
 
-### Video: src/i_video_spi_lcd.cpp (SPI LCD builds: ILI9486 `lcd` and ST7796U `lcd-st7796`, one file)
-- DOOM renderer writes `screens[0]`: 320×200, palette-indexed (indices 0–255).
-  **`screens[0]`'s address is never touched by this file** — Phase 4.6 tried
-  ping-ponging it directly between two buffers and reverted (Phase 4.6.2,
-  see docs/PLAN.md): several engine subsystems assume `screens[0]`'s
-  *content*, not just its address, persists across many tics — not just a
-  pointer-cache problem like `R_InitBuffer()` (below), which *can* be
-  refreshed. `doom/st_stuff.c`'s status bar does incremental "diff" redraws
-  that skip repainting unchanged widgets, trusting last tic's pixels are
-  still there; `doom/f_wipe.c`'s level-transition melt effect caches
-  `screens[0]`'s pointer *once* at the start of a ~30-tic animation and
-  keeps writing into that same captured address the whole time. Ping-ponging
-  `screens[0]` broke both (confirmed on hardware: corrupted/blinking status
-  bar and transition screens) — there's no per-call fix for this the way
-  `R_InitBuffer()` has one; a ping-ponged buffer just can't provide
-  frame-to-frame content continuity.
-- `I_SetPalette()` receives the PLAYPAL lump (256×3 RGB, full 8-bit values) each time
-  the palette changes; rebuilds a 256-entry RGB565 (wire/big-endian) LUT via
-  `gammatable[usegamma]`, matching the reference X11 driver's `UploadNewPalette`.
-- **`screens[0]` lives in SRAM on LCD builds** (`doom/v_video.c` `V_Init`, via
-  `I_TrySramMalloc`, PSRAM fallback with a boot-log message; `screens[1..3]` stay in
-  PSRAM). Measured: moving it from PSRAM took 25.3 -> 31.0 FPS (column writes with a
-  480-byte stride and the convert read were PSRAM-latency-bound). HDMI is unchanged.
-- **Blit pipeline** (`I_FinishUpdate`, core0 -> core1): per 25-row band, hash the raw
-  `screens[0]` indices; if equal to the last band actually sent, skip it entirely (no
-  convert, no DMA -- the panel keeps its GRAM). Otherwise convert to the wire-order
-  RGB565 LUT (word-wide: 4 source px per load, 2 dest px per store) into one of
-  `kNumSlots`=5 SRAM slots (24 KB each) and push `(band<<3)|slot` over the SDK FIFO;
-  core1's `i_video_core1_step()` `set_window` + DMAs it. Core0 blocks only when all slots
-  are in flight. **Hashes must be invalidated** (`invalidate_band_hashes()`) by anything
-  that changes index->color mapping or repaints the panel behind the game's back
-  (palette/gamma rebuild, `i_video_lcd_set_hires()` fill). Standing still: ~88% of
-  bands skipped, `core1-dma` 71% -> 9%. Slot count is bounded by SRAM left after
-  `screens[0]` (~269/289 KB heap used).
-- **Do NOT write the converted frame to PSRAM** (tried 2026-10, reverted): decoupling
-  core0 from the SPI drain with two 288 KB full-frame PSRAM slots made `core0-convert`
-  jump 3 -> 24 ms (PSRAM writes ~12 MB/s, one QSPI transaction per store) and FPS drop
-  31 -> 19. PSRAM reads are fine; PSRAM *writes* are the slow path. Same lesson applies
-  to any per-frame write-heavy buffer.
-- Other perf-pass results (all hardware-verified): `ylookup`/`columnofs` are static
-  SRAM arrays (~3 KB; were PSRAM pools, ~1000+ random reads/frame); hot renderer
-  code runs from RAM via `PICO_RAMFUNC()` (`__not_in_flash_func` wrapper, defined at the
-  top of each file): `R_RenderSegLoop`, `R_MapPlane`, `R_MakeSpans`, `R_DrawPlanes`,
-  `R_GetColumn`, `Z_ChangeTag2`, `W_CacheLumpNum` (plus the five `r_draw.c` loops from
-  Phase 4.7) -- the 16 KB XIP cache is shared with PSRAM data traffic, so flash-resident
-  hot code gets evicted constantly. SPI clock is already at its hardware ceiling
-  (clk_peri/2 = 132 MHz); raising it needs a higher clk_sys.
-- Ideas audited but not done: `FixedDiv2` uses soft-`double` (M33 FPU is single-precision;
-  few calls/frame, low value); `W_CheckNumForName` O(n) scan shows ~4% in profiles (hash
-  table would fix it regardless of caller, see PROFILING.md); `screens[0]` at 144 KB leaves
-  no room for more blit slots.
-- `r_draw.c`'s `R_InitBuffer()` caches per-row pointers *into* `screens[0]`
-  (`ylookup[i] = screens[0] + ...`), refreshed only on view-size changes (the
-  menu's screen-size +/- keys) — moot now that `screens[0]` never moves, but
-  the reason this file must never start reassigning `screens[0]` again without
-  re-reading the Phase 4.6.2 history first.
-- `pico_toolset::Ili9486` (Pico-Toolset submodule) — low-level SPI1 driver, originally
-  ported verbatim from the validated TOM6809 project (shift-register wire protocol,
-  panel init sequence) and since moved to Pico-Toolset (Phase 2); needs C++20
-  (`std::span`), hence `CMAKE_CXX_STANDARD 20`. Only ever touched from core0 during the
-  one-time `I_InitGraphics()`/`fill_solid()` bring-up call and from core1 thereafter
-  (`i_video_core1_step()`) — never concurrently.
-- Stats line (10s interval, see PROFILING.md for every field): `core0-wait%`
-  (backpressure -- core0 blocked on a free slot), `core0-convert%` (palette->RGB565
-  convert), `core1-dma%` (SPI feed), per-phase `tic/render3d/draw2d`, and
-  `bands-skipped%`. See
-  docs/PLAN.md's Phase 4.5/4.6 for the full history: a row-batching attempt
-  (`kRowsPerChunk=8`, since reverted to 1) made things both slower *and* caused a
-  hang after ~20s — plausibly Pico-PIO-USB's software-timed bus servicing needing
-  `tuh_task()` called more often than one chunk's worth of convert+DMA time allowed,
-  though unconfirmed.
-- `doom/tables.c`'s `finesine`/`finetangent`/`tantoangle` (~64KB) are `const` under
-  `#ifdef PICO` (`.rodata`/flash instead of `.data`/SRAM) — confirmed safe by finding
-  that `R_InitPointToAngle()`/`R_InitTables()`, the only code that ever assigns to
-  them, are both `#if 0`'d out by id Software themselves. This is what funded
-  `screens[0]`'s move to SRAM above; see
-  docs/PLAN.md's Phase 4.6 memory audit for what was and wasn't safe to relocate
-  (most of DOOM's big SRAM users are hot renderer state — `visplanes`, `openings`,
-  etc. — genuinely not movable without slowing the renderer).
+### Video: SPI LCD builds (ILI9486 `lcd`, ST7796U `lcd-st7796`)
+
+Full reference: **[docs/SPI_LCD.md](docs/SPI_LCD.md)** (`src/i_video_spi_lcd.cpp`, one file for both panels). In short:
+`screens[0]` (320x200 or 480x300, indexed) lives in SRAM and is never reassigned (the status bar and the wipe depend on
+its content/address persisting); `I_FinishUpdate` hashes 25-row bands, skips unchanged ones, converts the rest through the
+RGB565 LUT into SRAM slots and core1 DMAs them to the panel; never write the converted frame to PSRAM (writes are slow).
 
 ### Timing / loop
 The engine paces itself: `I_GetTime()` in tics (35 Hz, `TICRATE`), `I_StartTic`,
@@ -460,7 +329,7 @@ third_party/pico-toolset/    # git submodule: shared PSRAM/SD-card/fault-handler
 doom/                 # upstream DOOM 1.10 + null i_* stubs + PICO guards
 doom/i_sound_null.c   # sound stub (LCD builds)
 src/i_sound_dvi.cpp   # HDMI build: 8-voice SFX mixer -> HDMI audio ring, mixes in music
-src/mus_player.cpp/.hpp  # HDMI build: MUS parser + 10-voice chip-tune synth (core0-only)
+src/mus_player.cpp/.hpp  # C-style wrappers (mus_start/render/...) over pico_toolset::MusPlayer (the MUS parser + 10-voice chip-tune synth now live in Pico-Toolset's audio_synth)
 doom/i_net_null.c     # net stub
 docs/                 # PLAN.md + Waveshare product docs (saved pages)
 build/                # RP2350 LCD (ILI9486) build; also build-st7796/ (-DPICODOOM_VIDEO_OUTPUT=lcd-st7796) (rm -rf safe, see Build & firmware above)

@@ -34,7 +34,8 @@
 #include "board_config.hpp"
 #include "i_frame_stats.hpp"
 #include "i_video_gamma.hpp"
-#include "pixel_scale.hpp"
+#include "pico_toolset/st7701_indexed.h"
+#include "pico_toolset/st7701_indexed_rows.h"
 
 extern "C" {
 #include "doomdef.h"
@@ -91,19 +92,16 @@ constexpr size_t kCore1StackWords = 1536; // 6 KB (A2DP costs ~36 KB of SRAM; hi
 uint32_t g_core1_stack[kCore1StackWords];
 
 #ifndef PICODOOM_PRESTO_PALETTE
-// Scanline mode: what the callback reads. Set from core0 only.
-alignas(4) uint16_t g_lut[256];
-const uint8_t* volatile g_src = nullptr; // nullptr = black
-volatile int g_src_w = kPanelW;
+// Scanline mode: the line source the panel driver's callback reads (toolset st7701_indexed.h):
+// colour table + the current frame (null = black) + an optional overlay of rows. Set from core0.
+pico_toolset::St7701IndexedSource g_source;
 uint8_t* g_lowres_copy = nullptr; // 320x200 tear-free copy (low-res only)
-// Hi-res: a 480-wide copy of the top rows (everything above the status bar),
-// refreshed once per frame, so the 3D view / menus / HUD sprites -- drawn in
-// stages, sprites last -- never show half-drawn. The full 144 KB copy would not
-// fit next to screens[0]; the status bar below it redraws incrementally, so it
-// is scanned straight from screens[0].
+// Hi-res: a 480-wide copy of the frame (the whole thing when SRAM allows, else the rows above the
+// status bar) refreshed once per frame, so the 3D view / menus / HUD sprites -- drawn in stages,
+// sprites last -- never show half-drawn. If it covers only part, the rest is scanned straight from
+// screens[0].
 uint8_t* g_head_copy = nullptr;
 size_t g_head_alloc_rows = 0;
-volatile int g_head_rows = 0; // rows of g_head_copy that are valid
 int g_head_start = 0;         // first panel row the copy covers (anchored at the bottom of the 3D view)
 #endif
 
@@ -111,8 +109,7 @@ void set_entry(int i, uint8_t r, uint8_t g, uint8_t b) {
 #ifdef PICODOOM_PRESTO_PALETTE
     g_lcd.set_palette_colour(static_cast<uint8_t>(i), r, g, b);
 #else
-    const uint16_t rgb565 = static_cast<uint16_t>(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
-    g_lut[i] = pico_toolset::st7701_encode(rgb565);
+    g_source.set_entry(i, r, g, b);
 #endif
 }
 
@@ -134,28 +131,6 @@ void set_menu_palette() {
     }
 }
 
-#ifndef PICODOOM_PRESTO_PALETTE
-// Renders panel line y (0..299) from the 8-bit source through the LUT.
-// Runs on core1 in thread context under a ~one-line-time deadline: RAM code,
-// SRAM data only, word-wide moves.
-void __not_in_flash_func(line_callback)(int y, uint16_t* line, void*) {
-    const uint8_t* src = g_src;
-    uint32_t* d = reinterpret_cast<uint32_t*>(line);
-    if (!src) {
-        for (int i = 0; i < kPanelW / 2; ++i)
-            d[i] = 0;
-        return;
-    }
-    const uint16_t* lut = g_lut;
-    if (g_src_w == kPanelW) {
-        const int hy = y - g_head_start; // copy covers [g_head_start, g_head_start + g_head_rows)
-        const uint8_t* row = (hy >= 0 && hy < g_head_rows) ? g_head_copy + hy * kPanelW : src + y * kPanelW;
-        picodoom::convert_row_lut(d, row, lut);
-    } else {
-        picodoom::convert_row_lut_1p5(d, src + picodoom::source_row_1p5(y) * 320, lut);
-    }
-}
-#endif
 
 void __not_in_flash_func(core1_entry)() {
     g_lcd_ok = g_lcd.init(g_cfg);
@@ -309,13 +284,12 @@ void I_InitGraphics(void) {
 #ifdef PICODOOM_PRESTO_PALETTE
     g_cfg.framebuffer = g_surface;
 #else
-    g_cfg.line_callback = line_callback;
+    g_source.attach(g_cfg); // Scanline565 with this source as the line callback
 #endif
 
     set_menu_palette();
 #ifndef PICODOOM_PRESTO_PALETTE
-    g_src_w = kPanelW;
-    g_src = g_surface;
+    g_source.set_source(g_surface, kPanelW);
 #endif
 
     multicore_reset_core1();
@@ -348,7 +322,7 @@ void i_video_lcd_set_hires(int hires) {
 #else
     // Stop scanning the menu surface, give the callback a frame to leave it,
     // then hand its 144 KB back to the heap for screens[0] (and the low-res copy).
-    g_src = nullptr;
+    g_source.set_source(nullptr, kPanelW);
     __dmb();
     sleep_ms(50);
     free(g_surface);
@@ -360,8 +334,7 @@ void i_video_lcd_set_hires(int hires) {
             I_Error(const_cast<char*>("i_video_lcd_set_hires: no SRAM for the low-res display copy"));
         memset(g_lowres_copy, 0, bytes);
     }
-    g_head_rows = 0;
-    g_src_w = SCREENWIDTH;
+    g_source.set_overlay(nullptr, 0, 0);
 #endif
     __dmb();
     printf("PicoDoom: game frame %dx%d (%s)\n", SCREENWIDTH, SCREENHEIGHT, hires ? "high res" : "low res");
@@ -415,30 +388,27 @@ void do_copy() {
         const byte* src = screens[0];
         for (int k = 0; k < 100; ++k) {
             uint8_t* d = g_surface + (3 * k) * kPanelW;
-            picodoom::expand_row_1p5(d, src + (2 * k) * 320);
+            pico_toolset::expand_indexed_row_1p5(d, src + (2 * k) * 320);
             memcpy(d + kPanelW, d, kPanelW);
-            picodoom::expand_row_1p5(d + 2 * kPanelW, src + (2 * k + 1) * 320);
+            pico_toolset::expand_indexed_row_1p5(d + 2 * kPanelW, src + (2 * k + 1) * 320);
         }
     }
 #else
     if (SCREENWIDTH != kPanelW) {
         memcpy(g_lowres_copy, screens[0], 320 * 200);
-        if (g_src != g_lowres_copy) {
-            __dmb();
-            g_src = g_lowres_copy;
-        }
+        g_source.set_source(g_lowres_copy, 320);
     } else {
         if (!g_head_tried && gamestate == GS_LEVEL)
             try_alloc_head_copy();
+        static bool warned = false;
+        if (!warned && !in_sram(screens[0])) {
+            warned = true;
+            printf("PicoDoom: WARNING screens[0] is not in SRAM -- scanline565 hi-res cannot scan it\n");
+        }
+        g_source.set_source(screens[0], kPanelW);
         if (g_head_alloc_rows) {
             memcpy(g_head_copy, screens[0] + g_head_start * kPanelW, g_head_alloc_rows * kPanelW);
-            g_head_rows = static_cast<int>(g_head_alloc_rows);
-        }
-        if (g_src != screens[0]) {
-            if (!in_sram(screens[0]))
-                printf("PicoDoom: WARNING screens[0] is not in SRAM -- scanline565 hi-res cannot scan it\n");
-            __dmb();
-            g_src = screens[0];
+            g_source.set_overlay(g_head_copy, g_head_start, static_cast<int>(g_head_alloc_rows));
         }
     }
 #endif

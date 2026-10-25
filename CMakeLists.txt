@@ -404,6 +404,7 @@ target_link_libraries(PicoDoom
     pico_toolset_psram
     pico_toolset_fault_handler
     pico_toolset_rp_util
+    pico_toolset_audio_synth # MusPlayer (src/mus_player.cpp wraps it), SampleMixer
     $<$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},lcd>:pico_toolset_ili9486>
     $<$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},lcd-st7796>:pico_toolset_st7796>
     $<$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},hdmi>:pico_toolset_dvi_hdmi>

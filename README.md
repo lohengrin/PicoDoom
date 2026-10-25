@@ -58,7 +58,8 @@ Shared hardware drivers (PSRAM, µSD, ILI9486/ST7796/ST7701, FT6236, USB HID,
 Bluetooth HID/A2DP, QwSTPad, piezo, WS2812, DVI/HDMI, fault handler) come from the [Pico-Toolset](https://github.com/lohengrin/Pico-Toolset)
 git submodule.
 
-See [docs/PLAN.md](docs/PLAN.md) and [docs/HDMI_PLAN.md](docs/HDMI_PLAN.md) for the
+See [docs/PRESTO.md](docs/PRESTO.md) and [docs/SPI_LCD.md](docs/SPI_LCD.md) for the Presto and SPI LCD
+technical references, [docs/PLAN.md](docs/PLAN.md) and [docs/HDMI_PLAN.md](docs/HDMI_PLAN.md) for the
 phase-by-phase build log (including every bug found along the way and why),
 [PROFILING.md](PROFILING.md) for the profiling tools, and [AGENTS.md](AGENTS.md)
 for a technical map of the codebase, aimed at whoever (human or AI) picks this up next.

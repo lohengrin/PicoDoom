@@ -1,4 +1,5 @@
-// Host tests: pixel scaling / LUT conversion, joystick mapping, LED colours, piezo contour analysis.
+// Host tests: joystick mapping, LED colours, piezo contour analysis. (Row scaling / LUT conversion is
+// tested with its code, in Pico-Toolset: st7701_indexed_rows.h.)
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -8,7 +9,6 @@
 #include "joystick.hpp"
 #include "led_colours.hpp"
 #include "piezo_contour.hpp"
-#include "pixel_scale.hpp"
 
 using namespace picodoom;
 using pico_toolset::GamepadState;
@@ -21,36 +21,6 @@ static int g_failures = 0;
             ++g_failures;                                                       \
         }                                                                       \
     } while (0)
-
-static void test_pixel_scale() {
-    // Source rows: 2k -> panel rows 3k and 3k+1, 2k+1 -> 3k+2; the last panel row maps to row 199.
-    CHECK(source_row_1p5(0) == 0 && source_row_1p5(1) == 0 && source_row_1p5(2) == 1);
-    CHECK(source_row_1p5(3) == 2 && source_row_1p5(4) == 2 && source_row_1p5(5) == 3);
-    CHECK(source_row_1p5(299) == 199);
-
-    // expand_row_1p5: (a b) -> (a a b) over a whole row, checked against the definition.
-    alignas(4) uint8_t src[320];
-    alignas(4) uint8_t dst[480];
-    for (int i = 0; i < 320; ++i) src[i] = static_cast<uint8_t>(i * 7 + 3);
-    expand_row_1p5(dst, src);
-    for (int x = 0; x < 480; ++x) CHECK(dst[x] == src[x * 2 / 3]);
-
-    // convert_row_lut: 1:1, every index goes through the LUT, in order.
-    uint16_t lut[256];
-    for (int i = 0; i < 256; ++i) lut[i] = static_cast<uint16_t>(0x1000 + i * 3);
-    alignas(4) uint8_t row480[480];
-    for (int i = 0; i < 480; ++i) row480[i] = static_cast<uint8_t>(i * 5);
-    std::vector<uint32_t> out(240);
-    convert_row_lut(out.data(), row480, lut);
-    const uint16_t* px = reinterpret_cast<const uint16_t*>(out.data());
-    for (int x = 0; x < 480; ++x) CHECK(px[x] == lut[row480[x]]);
-
-    // convert_row_lut_1p5: same mapping as expand_row followed by the 1:1 conversion.
-    std::vector<uint32_t> out15(240);
-    convert_row_lut_1p5(out15.data(), src, lut);
-    const uint16_t* px15 = reinterpret_cast<const uint16_t*>(out15.data());
-    for (int x = 0; x < 480; ++x) CHECK(px15[x] == lut[src[x * 2 / 3]]);
-}
 
 static void test_joystick() {
     GamepadState pad;
@@ -132,7 +102,6 @@ static void test_piezo_contour() {
 }
 
 int main() {
-    test_pixel_scale();
     test_joystick();
     test_led_colours();
     test_piezo_contour();
