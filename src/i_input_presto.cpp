@@ -12,7 +12,9 @@
 #include "hid_source.hpp"
 #include "pico_toolset/bluetooth.h"
 #include "pico_toolset/bluetooth_hid.h"
+#include "pico_toolset/bluetooth_hid_source.h"
 #include "pico_toolset/qwstpad.h"
+#include "pico_toolset/qwstpad_gamepad.h"
 #include "pico_toolset/qwstpad_configs.h"
 
 #include "hardware/gpio.h"
@@ -41,7 +43,6 @@ using pico_toolset::BluetoothHid;
 using pico_toolset::BtHidEvent;
 using pico_toolset::BtHidEventType;
 using pico_toolset::GamepadState;
-namespace btn = pico_toolset::qwstpad_button;
 
 pico_toolset::Bluetooth g_bt;
 BluetoothHid g_hid;
@@ -50,10 +51,9 @@ bool g_bt_ok = false;
 bool g_pad_ok = false;
 uint16_t g_pad_buttons = 0;
 
-// Virtual cursor (canonical 640x480, like the USB mouse path) for the menu, plus
-// raw motion for mouselook: both fed by draining BluetoothHid in the poll hook.
-int g_cursor_x = 320, g_cursor_y = 240;
-int g_acc_dx = 0, g_acc_dy = 0, g_acc_wheel = 0;
+// Bluetooth devices as a HidSource: keeps the virtual 640x480 cursor for the menu and a raw
+// motion/wheel accumulator for mouselook; poll() folds the host's motion into both.
+pico_toolset::BluetoothHidSource g_bt_source(g_hid);
 
 volatile uint32_t g_passkey = 0;
 volatile bool g_pairing_failed = false;
@@ -84,66 +84,27 @@ void on_event(const BtHidEvent& e, void*)
     }
 }
 
+// Bluetooth keyboard/mouse/gamepad plus the QwSTPad: the pad is gamepad 0 and ORs its buttons into
+// a Bluetooth pad's.
 class PrestoHidSource final : public HidSource {
 public:
-    bool is_key_down(uint8_t usage) const override { return g_bt_ok && g_hid.is_key_down(usage); }
-    bool is_modifier_down(uint8_t mask) const override { return g_bt_ok && g_hid.is_modifier_down(mask); }
-
-    HidMouse mouse_state() const override
-    {
-        HidMouse m;
-        if (!g_bt_ok)
-            return m;
-        const BluetoothHid::MouseState s = g_hid.mouse_state();
-        m.present = s.present;
-        m.x = g_cursor_x;
-        m.y = g_cursor_y;
-        m.left = s.left;
-        m.right = s.right;
-        m.middle = s.middle;
-        return m;
-    }
-
-    void consume_mouse_delta(int& dx, int& dy) override
-    {
-        dx = g_acc_dx;
-        dy = g_acc_dy;
-        g_acc_dx = g_acc_dy = 0;
-    }
-
-    int consume_mouse_wheel() override
-    {
-        const int w = g_acc_wheel;
-        g_acc_wheel = 0;
-        return w;
-    }
+    bool is_key_down(uint8_t usage) const override { return g_bt_ok && g_bt_source.is_key_down(usage); }
+    bool is_modifier_down(uint8_t mask) const override { return g_bt_ok && g_bt_source.is_modifier_down(mask); }
+    HidMouse mouse_state() const override { return g_bt_ok ? g_bt_source.mouse_state() : HidMouse{}; }
+    void consume_mouse_delta(int& dx, int& dy) override { g_bt_source.consume_mouse_delta(dx, dy); }
+    int consume_mouse_wheel() override { return g_bt_source.consume_mouse_wheel(); }
 
     GamepadState gamepad_state(size_t index) const override
     {
-        GamepadState s;
+        GamepadState bt;
         if (g_bt_ok)
-            s = g_hid.gamepad_state(index);
+            bt = g_bt_source.gamepad_state(index);
         if (index != 0 || !g_pad_ok)
-            return s;
-        // QwSTPad is pad 0 and adds its buttons to a Bluetooth pad's, if any.
-        s.present = true;
-        uint16_t b = s.buttons;
-        const uint16_t p = g_pad_buttons;
-        if (p & btn::A) b |= pico_toolset::kBtA;
-        if (p & btn::B) b |= pico_toolset::kBtB;
-        if (p & btn::X) b |= pico_toolset::kBtX;
-        if (p & btn::Y) b |= pico_toolset::kBtY;
-        if (p & btn::Up) b |= pico_toolset::kBtUp;
-        if (p & btn::Down) b |= pico_toolset::kBtDown;
-        if (p & btn::Left) b |= pico_toolset::kBtLeft;
-        if (p & btn::Right) b |= pico_toolset::kBtRight;
-        if (p & btn::Plus) b |= pico_toolset::kBtStart;
-        if (p & btn::Minus) b |= pico_toolset::kBtBack;
-        s.buttons = b;
-        return s;
+            return bt;
+        return pico_toolset::merge(bt, pico_toolset::qwstpad_gamepad_state(g_pad_buttons));
     }
 
-    uint8_t connected_keyboard_count() const override { return g_bt_ok ? g_hid.connected_keyboard_count() : 0; }
+    uint8_t connected_keyboard_count() const override { return g_bt_ok ? g_bt_source.connected_keyboard_count() : 0; }
 };
 
 PrestoHidSource g_source;
@@ -163,17 +124,8 @@ void i_input_backend_poll(void)
 #endif
     if (g_pad_ok)
         g_pad_buttons = g_pad.read_buttons();
-    if (!g_bt_ok)
-        return;
-    int dx = 0, dy = 0;
-    g_hid.consume_mouse_delta(dx, dy);
-    if (dx != 0 || dy != 0) {
-        g_acc_dx += dx;
-        g_acc_dy += dy;
-        g_cursor_x = std::clamp(g_cursor_x + dx, 0, 639);
-        g_cursor_y = std::clamp(g_cursor_y + dy, 0, 479);
-    }
-    g_acc_wheel += g_hid.consume_mouse_wheel();
+    if (g_bt_ok)
+        g_bt_source.poll();
 }
 
 // Called once from main(), after PSRAM/uSD and before the boot menu: QwSTPad on

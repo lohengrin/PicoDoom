@@ -10,6 +10,10 @@
 //   gamma                show current gamma factor
 //   gamma up|down        +/- 0.1  (clamped [0.1, 10])
 //   gamma <v>            set gamma factor
+//   piezo beep [hz [ms]] full-scale square wave through the piezo PCM path (default 1500 Hz, 1000 ms)
+//   piezo gain [n]       show/set the piezo PCM gain (1-256, default 50)
+//   piezo pre [on|off]   treble boost (first difference) before the gain, default on
+//   piezo diag on|off    periodic piezo PCM stats line (default off)
 //   mouse                show mouse posting state
 //   mouse on|off         enable/disable mouselook posting
 //   sens                 show mouse sensitivity (0-9)
@@ -30,7 +34,17 @@ extern "C" {
 // src/i_video_*.cpp -- gamma factor.
 float i_video_gamma(void);
 void i_video_set_gamma(float gamma);
-// src/i_input_usbhid.cpp -- mouselook posting.
+#ifdef PICODOOM_PRESTO
+// src/i_sound_piezo.cpp -- piezo PCM diagnostics.
+bool i_sound_piezo_available(void);
+void i_sound_piezo_beep(unsigned hz, unsigned ms);
+void i_sound_piezo_set_diag(bool on);
+bool i_sound_piezo_pre(void);
+void i_sound_piezo_set_pre(bool on);
+int i_sound_piezo_gain(void);
+void i_sound_piezo_set_gain(int gain);
+#endif
+// src/i_input_*.cpp -- mouselook posting.
 bool i_input_mouse_enabled(void);
 void i_input_set_mouse_enabled(bool enabled);
 }
@@ -127,6 +141,47 @@ void cmd_mouse(char* args)
     printf("PicoDoom: mouse: unknown arg '%s' (use on or off)\n", arg);
 }
 
+#ifdef PICODOOM_PRESTO
+void cmd_piezo(char* args)
+{
+    char* arg = next_token(&args);
+    if (!i_sound_piezo_available()) {
+        printf("PicoDoom: piezo PCM output is not running\n");
+        return;
+    }
+    if (arg && std::strcmp(arg, "beep") == 0) {
+        char* a = next_token(&args);
+        char* b = next_token(&args);
+        const unsigned hz = a ? static_cast<unsigned>(std::strtoul(a, nullptr, 10)) : 1500;
+        const unsigned ms = b ? static_cast<unsigned>(std::strtoul(b, nullptr, 10)) : 1000;
+        printf("PicoDoom: piezo beep %u Hz for %u ms\n", hz ? hz : 1500, ms);
+        i_sound_piezo_beep(hz ? hz : 1500, ms);
+        return;
+    }
+    if (arg && std::strcmp(arg, "gain") == 0) {
+        char* a = next_token(&args);
+        if (a)
+            i_sound_piezo_set_gain(static_cast<int>(std::strtol(a, nullptr, 10)));
+        printf("PicoDoom: piezo gain %d\n", i_sound_piezo_gain());
+        return;
+    }
+    if (arg && std::strcmp(arg, "pre") == 0) {
+        char* a = next_token(&args);
+        if (a)
+            i_sound_piezo_set_pre(std::strcmp(a, "on") == 0);
+        printf("PicoDoom: piezo pre-emphasis %s\n", i_sound_piezo_pre() ? "on" : "off");
+        return;
+    }
+    if (arg && std::strcmp(arg, "diag") == 0) {
+        char* a = next_token(&args);
+        i_sound_piezo_set_diag(a && std::strcmp(a, "on") == 0);
+        printf("PicoDoom: piezo diag %s\n", a && std::strcmp(a, "on") == 0 ? "on" : "off");
+        return;
+    }
+    printf("PicoDoom: piezo: usage  piezo beep [hz [ms]]  |  piezo gain [n]  |  piezo pre [on|off]  |  piezo diag on|off\n");
+}
+#endif
+
 void cmd_sens(char* args)
 {
     char* arg = next_token(&args);
@@ -171,6 +226,9 @@ void process_line(char* line, int len)
     if (std::strcmp(cmd, "gamma") == 0) { cmd_gamma(rest); return; }
     if (std::strcmp(cmd, "mouse") == 0) { cmd_mouse(rest); return; }
     if (std::strcmp(cmd, "sens") == 0) { cmd_sens(rest); return; }
+#ifdef PICODOOM_PRESTO
+    if (std::strcmp(cmd, "piezo") == 0) { cmd_piezo(rest); return; }
+#endif
     printf("PicoDoom: unknown command '%s' -- type 'help' for a list\n", cmd);
 }
 

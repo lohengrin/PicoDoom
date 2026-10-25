@@ -26,6 +26,7 @@
 // there's no SPI-feed core1 contention to avoid instead).
 #include "hid_source.hpp"
 #include "pico_toolset/usb_hid_host.h"
+#include "pico_toolset/usb_hid_source.h"
 #include "pico_toolset/usb_hid_configs.h"
 #ifdef PICODOOM_SPI_LCD
 #include "i_video_core1.hpp"
@@ -39,29 +40,7 @@ namespace {
 
 pico_toolset::UsbHidHost g_usb_hid;
 
-class UsbHidSource final : public HidSource {
-public:
-    bool is_key_down(uint8_t usage) const override { return g_usb_hid.is_key_down(usage); }
-    bool is_modifier_down(uint8_t mask) const override { return g_usb_hid.is_modifier_down(mask); }
-    HidMouse mouse_state() const override
-    {
-        pico_toolset::UsbHidHost::MouseState m = g_usb_hid.mouse_state();
-        HidMouse out;
-        out.present = m.present;
-        out.x = m.x;
-        out.y = m.y;
-        out.left = m.left_button;
-        out.right = m.right_button;
-        out.middle = m.middle_button;
-        return out;
-    }
-    void consume_mouse_delta(int& dx, int& dy) override { g_usb_hid.consume_mouse_delta(dx, dy); }
-    int consume_mouse_wheel() override { return g_usb_hid.consume_mouse_wheel(); }
-    pico_toolset::GamepadState gamepad_state(size_t index) const override { return g_usb_hid.gamepad_state(index); }
-    uint8_t connected_keyboard_count() const override { return g_usb_hid.connected_keyboard_count(); }
-};
-
-UsbHidSource g_source;
+pico_toolset::UsbHidSource g_source(g_usb_hid);
 
 #ifdef PICODOOM_SPI_LCD
 // core1's stack -- deliberately not the default multicore_launch_core1()

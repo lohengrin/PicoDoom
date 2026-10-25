@@ -57,7 +57,7 @@ PSRAM, uSD (SPI0), piezo GPIO43, QW/ST I2C0 (QwSTPad 0x21), CYW43 radio used for
     (`lvgl_display_presto.cpp`): the palette-mode framebuffer, or a temporary 144 KB buffer in
     scanline mode that `i_video_lcd_set_hires()` frees before the engine allocates `screens[0]`.
 - **Beam-synchronised copies** (deferred): every per-frame copy (scanline low/hi-res, palette double buffer / 1.5x expand) runs only while `St7701::display_row()` >= 300, i.e. the beam is on the black band/porches where nothing is read from the buffer; a top-to-bottom copy started there stays ahead of the next frame's beam, so there is no seam (~40% of each ~8 ms frame is such a window; refresh = dot clock / 264k, dot clock = clk_sys/even divider, cap 34 MHz). `I_FinishUpdate()` only *requests* the copy; `presto_video_poll()` (called first thing in `I_StartTic()`, which the engine polls in a tight loop while idling for the next tic) performs it when the beam gets there, and `presto_video_flush()` (top of `D_Display()`, the only place that draws; `doom/d_main.c` shim) blocks if it still is not done. Stats field `beam-sync-wait` = time spent in that blocking wait (should now be small).
-- **Input**: `src/hid_source.hpp` (`HidSource`) is the backend-neutral input view; shared event
+- **Input**: `HidSource` (Pico-Toolset `pico_toolset/hid_source.h`, re-exported by `src/hid_source.hpp`, with `UsbHidSource` / `BluetoothHidSource` adapters) is the backend-neutral input view; shared event
   posting is `src/i_input_tic.cpp` (`I_StartTic`), backends are `i_input_usbhid.cpp` (PiZero) and
   `i_input_presto.cpp` (Bluetooth HID via `pico_toolset_bluetooth_hid` + QwSTPad D-pad/A/B/X/Y/+/-;
   QwSTPad is pad 0 and ORs into a Bluetooth pad). Pad Start (QwSTPad +) posts Esc, Back (-) posts Tab,
@@ -65,7 +65,7 @@ PSRAM, uSD (SPI0), piezo GPIO43, QW/ST I2C0 (QwSTPad 0x21), CYW43 radio used for
   and a status line (passkey for keyboards). Bonded devices reconnect by themselves; pairing starts
   automatically when nothing is bonded. Gamepad button order for Bluetooth pads is a guess upstream
   (`gamepad_raw_buttons()` shows the real usages).
-- **Audio** (`src/presto_mixer.cpp`, `src/i_sound_piezo.cpp`): one shared mono mixer (8 DMX voices with
+- **Audio** (`src/presto_mixer.cpp`, `src/i_sound_piezo.cpp`): one shared mono mixer (toolset `SampleMixer<8>` for the 8 DMX voices with
   linear interpolation/pitch/volume + the MUS synth `mus_render()`), rendered on demand by whichever output is
   active. **Piezo**: Pico-Toolset's `PiezoPcm` (DMA-paced PWM duty cycle on GPIO43, 44.1 kHz) fed by a 5 ms
   repeating timer (interrupt context, so long game frames cannot starve it) that keeps ~18 ms queued; the output
@@ -74,7 +74,7 @@ PSRAM, uSD (SPI0), piezo GPIO43, QW/ST I2C0 (QwSTPad 0x21), CYW43 radio used for
   than corruption; game-thread voice/`mus_*` access is inside `pico_toolset::IrqLock`. Fallback if `PiezoPcm`
   cannot start (no free DMA channel/timer): the original single-voice tone approximation (per-sound contour of
   25 ms windows of zero-crossing pitch + loudness, music as the MUS sequencer's lead voice via `mus_step`/
-  `mus_lead`). `doom/s_sound.c` PICO stubs are gated on `PICODOOM_AUDIO` (hdmi + presto). Muted at start;
+  `mus_lead`). Production is paced at the sample rate from the 5 ms timer (PiezoPcm only learns the DMA read position every 10 ms and wipes the ring on an underrun, so topping up from `queued()` loses audio). Level: the piezo is nearly deaf below ~500 Hz and DOOM's audio is bass-heavy, so the timer applies a first-difference treble boost (`piezo pre`, default on) then `g_pcm_gain` (default 50; 100 verified audible: heavy clipping, rough -- smarter processing, e.g. band-pass before the clip, is a later idea) with a hard clip. Console: `piezo beep [hz [ms]]` (full-scale square through the same path -- note it ignores gain/pre), `piezo gain [n]`, `piezo pre [on|off]`, `piezo diag on|off`. `doom/s_sound.c` PICO stubs are gated on `PICODOOM_AUDIO` (hdmi + presto). Muted at start;
   BOOTSEL toggles (`pico_toolset::bootsel_pressed()`), a streaming headset unmutes.
 - **Bluetooth audio (A2DP)** (`src/presto_a2dp.cpp`, `-DPICODOOM_PRESTO_A2DP=ON` default): when a headset is
   *streaming*, `i_sound_piezo.cpp` stops the piezo and the real audio goes there. There is **no buffer**: the SBC
@@ -381,6 +381,14 @@ LCD driver.
   used, just never enabled. If touching these functions, keep new reads going
   through the cached locals, not the `dc_*`/`ds_*` globals, inside the loop.
 
+## Tests
+
+Host (PC) unit tests for the hardware-free logic live in `tests/host`
+(`cmake -S tests/host -B tests-build && cmake --build tests-build && ctest --test-dir tests-build`):
+`pixel_scale.hpp` (1.5x row expansion / LUT conversion), `joystick.hpp`, `led_colours.hpp`, `piezo_contour.hpp`.
+New pure logic goes in a header under `src/` so it can be tested there (the toolset has its own
+`tests/host` for `SampleMixer`, audio sources and HID parsing).
+
 ## Conventions
 
 - Keep `doom/` engine files untouched (upstream, ported only via `#ifdef PICO`).
@@ -441,6 +449,8 @@ src/lvgl_indev.cpp         # LVGL indevs: mouse (scales 640x480 cursor), touch (
                            # defaults), keypad (keyboard+gamepad -> LV_KEY_*) + input_seen flag that
                            # stops the menu's auto-start countdown
 src/wad_boot.h/.hpp        # boot WAD selection + gamemode sniffing + default.cfg read/rewrite
+src/menu_board.hpp         # per-board parts of the boot menu (display init, touch init, extra widgets, poll): menu_board_{spi_lcd,hdmi,presto}.cpp;
+                           # wad_menu.cpp itself has no board #ifs
 src/wad_menu.cpp           # boot WAD-selection menu: title, per-IWAD buttons (one lv_group), 30s
                            # auto-start countdown, Skip; calls I_InitGraphics() (once-guarded) first
 third_party/pico-toolset/    # git submodule: shared PSRAM/SD-card/fault-handler/board-header/

@@ -204,11 +204,11 @@ set(PICODOOM_MENU_SRC
     src/wad_menu.cpp
 )
 if(PICODOOM_VIDEO_OUTPUT STREQUAL "hdmi")
-    list(APPEND PICODOOM_MENU_SRC src/lvgl_display_dvi.cpp)
+    list(APPEND PICODOOM_MENU_SRC src/lvgl_display_dvi.cpp src/menu_board_hdmi.cpp)
 elseif(PICODOOM_VIDEO_OUTPUT STREQUAL "presto")
-    list(APPEND PICODOOM_MENU_SRC src/lvgl_display_presto.cpp)
+    list(APPEND PICODOOM_MENU_SRC src/lvgl_display_presto.cpp src/menu_board_presto.cpp)
 else()
-    list(APPEND PICODOOM_MENU_SRC src/lvgl_display_lcd.cpp)
+    list(APPEND PICODOOM_MENU_SRC src/lvgl_display_lcd.cpp src/menu_board_spi_lcd.cpp)
 endif()
 
 SET(DOOMSRC

@@ -20,6 +20,7 @@
 #include "pico_toolset/piezo_pcm.h"
 #include "pico_toolset/psram.h"
 #include "mus_player.hpp"
+#include "piezo_contour.hpp"
 #include "presto_mixer.hpp"
 
 #include "pico/time.h"
@@ -96,33 +97,103 @@ int g_next_handle = 1;
 pico_toolset::PiezoPcm g_pcm;
 bool g_pcm_ok = false;
 repeating_timer_t g_pcm_timer;
-constexpr size_t kPcmTargetQueued = 800; // ~18 ms at 44.1 kHz
+constexpr size_t kPcmTargetQueued = 768; // PiezoPcm restarts its producer this far (~17 ms) ahead
+constexpr uint32_t kPcmRate = 44100;
+// PiezoPcm keeps the top 8 bits of each sample (sample >> 8 around the PWM mid level), while the
+// mixer's output is sized for a headset behind a volume control: typical peaks of 500-3000 out of
+// 32767 would move the piezo's duty cycle by only 2-12 of +-127 steps. Boost, hard-clipping the
+// loudest effects (a piezo is a loud, harsh transducer anyway).
+volatile int g_pcm_gain = 50;       // `piezo gain <n>` on the serial console (clipped but audible; 100 was verified on hardware)
+// A piezo has almost no response below ~500 Hz and is loudest around 1-4 kHz, while DOOM's effects
+// and music are bass/low-mid heavy: a first difference (+6 dB/octave) before the gain moves the
+// energy up into the band the piezo can reproduce; the hard clip afterwards adds the harmonics a
+// speaker-less "PC speaker" style output lives on. `piezo pre on|off`.
+volatile bool g_pcm_pre = true;
+constexpr int kPcmPreGain = 4;      // the difference of a 1 kHz tone is ~0.14 of its level: make up for it
+int32_t g_pcm_prev = 0;
+volatile bool g_pcm_diag = false;   // `piezo diag on|off`: periodic stats line
+// `piezo beep`: a full-scale square wave through the same PCM path, for hardware checks.
+volatile uint32_t g_beep_left = 0;  // samples remaining
+volatile uint32_t g_beep_half = 0;  // half period in samples
+uint32_t g_beep_phase = 0;
+constexpr uint64_t kPcmIdleUs = 40'000;  // silence this long -> pause the output (pin low)
+
+// Producer state, touched only by the timer callback (interrupt context, core 0).
+bool g_pcm_running = false;
+uint64_t g_pcm_last_us = 0;       // time up to which samples have been produced
+uint64_t g_pcm_active_us = 0;     // last time the mixer had something to play
+uint64_t g_pcm_frac = 0;          // sub-sample remainder of the elapsed time (microsamples)
+volatile uint32_t g_pcm_written = 0;
+uint64_t g_pcm_diag_us = 0;
+uint32_t g_pcm_diag_last = 0;
 
 // Whether SFX/music go through the shared mixer (headset or PCM piezo) rather than the tone fallback.
 bool use_mixer() { return g_pcm_ok || presto_a2dp_streaming(); }
 
-// 5 ms timer, interrupt context: top the PCM ring up from the mixer. Stays out of the way while
-// a headset is streaming (the Bluetooth callback owns the mixer then) and idles the output.
+// 5 ms timer, interrupt context. PiezoPcm only learns the DMA read position every 10 ms (its guard
+// timer) and wipes the ring on an underrun, so topping the ring up to a target "queued" level from
+// queued() would read stale values and lose audio. Instead produce at the sample rate: the
+// samples due since the last tick (same crystal as the DMA timer), plus a gentle correction towards
+// the target lead for the ppm-level rate error. It stays out of the way while a headset is
+// streaming (the Bluetooth callback owns the mixer then) and pauses the output (pin low) when idle.
 bool pcm_timer_cb(repeating_timer_t*) {
+    const uint64_t now = time_us_64();
     if (presto_a2dp_streaming()) {
         if (!g_pcm.paused())
             g_pcm.pause();
+        g_pcm_running = false;
         return true;
     }
-    const size_t queued = g_pcm.queued();
-    if (!presto_mixer_active()) {
-        if (queued == 0 && !g_pcm.paused())
-            g_pcm.pause(); // pin low: no carrier hiss while silent
+    const bool beeping = g_beep_left > 0;
+    if (presto_mixer_active() || beeping)
+        g_pcm_active_us = now;
+    else if (g_pcm_running && now - g_pcm_active_us > kPcmIdleUs) {
+        g_pcm.pause();
+        g_pcm_running = false;
+    }
+    if (!presto_mixer_active() && !beeping) {
+        g_pcm_last_us = now; // nothing to produce: do not accumulate "due" samples
         return true;
+    }
+    if (!g_pcm_running) {
+        g_pcm_running = true; // the first write() resumes the output with ~17 ms of silence ahead
+        g_pcm_last_us = now;
+        g_pcm_frac = 0;
+    }
+    g_pcm_frac += (now - g_pcm_last_us) * kPcmRate;
+    g_pcm_last_us = now;
+    int64_t due = static_cast<int64_t>(g_pcm_frac / 1'000'000);
+    g_pcm_frac %= 1'000'000;
+    if (!g_pcm.paused()) {
+        const int64_t lead_error = static_cast<int64_t>(kPcmTargetQueued) - static_cast<int64_t>(g_pcm.queued());
+        due += std::clamp<int64_t>(lead_error / 8, -32, 32);
     }
     static int16_t chunk[kMixerMaxChunk];
-    size_t need = queued < kPcmTargetQueued ? kPcmTargetQueued - queued : 0;
-    while (need > 0) {
-        const int n = static_cast<int>(std::min<size_t>(need, kMixerMaxChunk));
-        if (!presto_mixer_render(chunk, n))
-            break;
-        g_pcm.write(chunk, static_cast<size_t>(n));
-        need -= static_cast<size_t>(n);
+    while (due > 0) {
+        const int n = static_cast<int>(std::min<int64_t>(due, kMixerMaxChunk));
+        if (g_beep_left > 0) {
+            for (int i = 0; i < n; ++i) {
+                chunk[i] = g_beep_left > 0 && ((g_beep_phase++ / g_beep_half) & 1) ? 32000 : -32000;
+                if (g_beep_left > 0)
+                    g_beep_left = g_beep_left - 1;
+            }
+        } else {
+            if (!presto_mixer_render(chunk, n))
+                break;
+            const int gain = g_pcm_gain;
+            const bool pre = g_pcm_pre;
+            for (int i = 0; i < n; ++i) {
+                int32_t x = chunk[i];
+                if (pre) {
+                    const int32_t d = (x - g_pcm_prev) * kPcmPreGain;
+                    g_pcm_prev = x;
+                    x = d;
+                }
+                chunk[i] = static_cast<int16_t>(std::clamp<int32_t>(x * gain, -32767, 32767));
+            }
+        }
+        g_pcm_written = g_pcm_written + static_cast<uint32_t>(g_pcm.write(chunk, static_cast<size_t>(n)));
+        due -= n;
     }
     return true;
 }
@@ -179,23 +250,9 @@ void build_contour(int id, const uint8_t* pcm, uint32_t count, uint32_t rate) {
     for (uint32_t w = 0; w < windows; ++w) {
         const uint32_t a = w * per_window;
         const uint32_t b = std::min(count, a + per_window);
-        uint32_t crossings = 0;
-        uint32_t absdev = 0;
-        bool above = pcm[a] >= 128;
-        for (uint32_t i = a; i < b; ++i) {
-            const int dev = static_cast<int>(pcm[i]) - 128;
-            absdev += static_cast<uint32_t>(dev < 0 ? -dev : dev);
-            // Hysteresis band keeps hiss around the centre from counting.
-            if (above && dev < -6) { above = false; ++crossings; }
-            else if (!above && dev > 6) { above = true; ++crossings; }
-        }
-        const uint32_t n = b - a;
-        const float seconds = static_cast<float>(n) / static_cast<float>(rate);
-        float hz = seconds > 0.0f ? static_cast<float>(crossings) * 0.5f / seconds : 0.0f;
-        hz = std::clamp(hz, kMinHz, kMaxHz);
-        const float mad = n ? static_cast<float>(absdev) / static_cast<float>(n) : 0.0f;
-        freq[w] = static_cast<uint16_t>(hz);
-        level[w] = static_cast<uint8_t>(std::min(255.0f, mad * (255.0f / 40.0f)));
+        const picodoom::ContourWindow cw = picodoom::analyze_window(pcm + a, b - a, rate, kMinHz, kMaxHz);
+        freq[w] = cw.hz;
+        level[w] = cw.level;
     }
     g_contours[id].windows = static_cast<uint16_t>(windows);
     g_contours[id].freq = freq;
@@ -302,6 +359,17 @@ void I_SubmitSound(void) {
         }
         g_prev_bootsel = pressed;
     }
+    if (g_pcm_ok && g_pcm_diag && !g_muted && now_us - g_pcm_diag_us > 5'000'000) {
+        g_pcm_diag_us = now_us;
+        if (g_pcm_written != g_pcm_diag_last) {
+            const PrestoMixerStats ms = presto_mixer_take_stats();
+            printf("PicoDoom: piezo pcm: written %u samples  underruns %u  queued %u%s  mixer peak %u (x%d)  sfx %u\n",
+                   static_cast<unsigned>(g_pcm_written), static_cast<unsigned>(g_pcm.underruns()),
+                   static_cast<unsigned>(g_pcm.queued()), g_pcm.paused() ? "  (paused)" : "",
+                   static_cast<unsigned>(ms.peak), static_cast<int>(g_pcm_gain), static_cast<unsigned>(ms.sfx_started));
+            g_pcm_diag_last = g_pcm_written;
+        }
+    }
     if (presto_a2dp_take_stream_started() && g_muted) {
         g_muted = false; // connecting a headset is a deliberate "I want sound"; BOOTSEL mutes again
         presto_mixer_set_enabled(true);
@@ -405,3 +473,36 @@ void I_StopSong(int handle) { (void)handle; IrqLock l; mus_stop(); }
 void I_UnRegisterSong(int handle) { (void)handle; g_song = nullptr; }
 
 } // extern "C"
+
+// Serial-console hooks (src/i_serial_console.cpp, `piezo ...`).
+extern "C" bool i_sound_piezo_available(void) {
+    return g_pcm_ok;
+}
+
+extern "C" void i_sound_piezo_beep(unsigned hz, unsigned ms) {
+    if (!g_pcm_ok || hz == 0)
+        return;
+    g_beep_half = std::max<uint32_t>(1, kPcmRate / (2 * hz));
+    g_beep_phase = 0;
+    g_beep_left = kPcmRate / 1000 * ms;
+}
+
+extern "C" bool i_sound_piezo_pre(void) {
+    return g_pcm_pre;
+}
+
+extern "C" void i_sound_piezo_set_pre(bool on) {
+    g_pcm_pre = on;
+}
+
+extern "C" void i_sound_piezo_set_diag(bool on) {
+    g_pcm_diag = on;
+}
+
+extern "C" int i_sound_piezo_gain(void) {
+    return g_pcm_gain;
+}
+
+extern "C" void i_sound_piezo_set_gain(int gain) {
+    g_pcm_gain = std::clamp(gain, 1, 256);
+}

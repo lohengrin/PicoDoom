@@ -34,6 +34,7 @@
 #include "board_config.hpp"
 #include "i_frame_stats.hpp"
 #include "i_video_gamma.hpp"
+#include "pixel_scale.hpp"
 
 extern "C" {
 #include "doomdef.h"
@@ -149,23 +150,9 @@ void __not_in_flash_func(line_callback)(int y, uint16_t* line, void*) {
     if (g_src_w == kPanelW) {
         const int hy = y - g_head_start; // copy covers [g_head_start, g_head_start + g_head_rows)
         const uint8_t* row = (hy >= 0 && hy < g_head_rows) ? g_head_copy + hy * kPanelW : src + y * kPanelW;
-        const uint32_t* s = reinterpret_cast<const uint32_t*>(row);
-        for (int i = 0; i < kPanelW / 4; ++i) {
-            const uint32_t w = s[i];
-            d[2 * i]     = lut[w & 0xFF] | (static_cast<uint32_t>(lut[(w >> 8) & 0xFF]) << 16);
-            d[2 * i + 1] = lut[(w >> 16) & 0xFF] | (static_cast<uint32_t>(lut[w >> 24]) << 16);
-        }
+        picodoom::convert_row_lut(d, row, lut);
     } else {
-        // 320 -> 480: source pixels (a b c d) become (a a b c c d).
-        const uint32_t* s = reinterpret_cast<const uint32_t*>(src + (y * 2 / 3) * 320);
-        for (int i = 0; i < 320 / 4; ++i) {
-            const uint32_t w = s[i];
-            const uint32_t a = lut[w & 0xFF], b = lut[(w >> 8) & 0xFF];
-            const uint32_t c = lut[(w >> 16) & 0xFF], e = lut[w >> 24];
-            d[3 * i]     = a | (a << 16);
-            d[3 * i + 1] = b | (c << 16);
-            d[3 * i + 2] = c | (e << 16);
-        }
+        picodoom::convert_row_lut_1p5(d, src + picodoom::source_row_1p5(y) * 320, lut);
     }
 }
 #endif
@@ -298,20 +285,6 @@ void report_stats_if_due(uint64_t now_us) {
 }
 
 #ifdef PICODOOM_PRESTO_PALETTE
-// Expands one 320-px source row into 480 px (a b c d e f g h -> a a b c c d e e f g g h).
-void expand_row(uint8_t* dst, const uint8_t* src) {
-    const uint32_t* s = reinterpret_cast<const uint32_t*>(src);
-    uint32_t* d = reinterpret_cast<uint32_t*>(dst);
-    for (int i = 0; i < 320 / 8; ++i) {
-        const uint32_t w0 = s[2 * i], w1 = s[2 * i + 1];
-        const uint32_t a = w0 & 0xFF, b = (w0 >> 8) & 0xFF, c = (w0 >> 16) & 0xFF, e = w0 >> 24;
-        const uint32_t f = w1 & 0xFF, g = (w1 >> 8) & 0xFF, h = (w1 >> 16) & 0xFF, k = w1 >> 24;
-        // output bytes: a a b c | c e f f | g h h k  (pairs (a,b),(c,e),(f,g),(h,k))
-        d[3 * i]     = a | (a << 8) | (b << 16) | (c << 24);
-        d[3 * i + 1] = c | (e << 8) | (f << 16) | (f << 24);
-        d[3 * i + 2] = g | (h << 8) | (h << 16) | (k << 24);
-    }
-}
 #endif
 
 } // namespace
@@ -442,9 +415,9 @@ void do_copy() {
         const byte* src = screens[0];
         for (int k = 0; k < 100; ++k) {
             uint8_t* d = g_surface + (3 * k) * kPanelW;
-            expand_row(d, src + (2 * k) * 320);
+            picodoom::expand_row_1p5(d, src + (2 * k) * 320);
             memcpy(d + kPanelW, d, kPanelW);
-            expand_row(d + 2 * kPanelW, src + (2 * k + 1) * 320);
+            picodoom::expand_row_1p5(d + 2 * kPanelW, src + (2 * k + 1) * 320);
         }
     }
 #else

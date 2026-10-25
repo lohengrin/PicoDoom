@@ -4,6 +4,7 @@
 // src/i_input_usbhid.cpp and Bluetooth HID + QwSTPad in src/i_input_presto.cpp.
 // C++ driver behind a plain C interface, same bridging pattern as src/i_video_*.cpp.
 #include "hid_source.hpp"
+#include "joystick.hpp"
 // Pico-specific runtime tuning commands over the USB CDC -- the replacement
 // for this file's old F1/F2/F3/F4/F10/F11/F12 intercepts (now freed for
 // vanilla DOOM use, see hid_to_doom_key()'s doc comment below).
@@ -99,35 +100,6 @@ bool g_prev_pad_back = false;
 // DOOM meanings.
 bool g_mouse_enabled = true;
 
-// ev_joystick payload from a gamepad (doom/d_event.h): data1 bits 0-3 = A/B/X/Y (the engine's
-// fire/strafe/run/use bindings, joyb_* in doom/m_misc.c), data2/data3 = x/y as -1/0/1 -- the
-// engine only compares them to 0, so a deadzoned sign is both correct and sufficient. High ly =
-// down (pico_toolset's gamepad convention, so no inversion); the D-pad overrides the stick.
-struct Joy {
-    uint8_t buttons;
-    int x, y;
-};
-
-Joy joystick_from(const pico_toolset::GamepadState& pad)
-{
-    constexpr int kStickCenter = 128;
-    constexpr int kDeadzone = 40; // out of 128 each direction from centre
-    const int lx = static_cast<int>(pad.lx) - kStickCenter;
-    const int ly = static_cast<int>(pad.ly) - kStickCenter;
-    Joy j;
-    j.x = (lx > kDeadzone) ? 1 : (lx < -kDeadzone) ? -1 : 0;
-    j.y = (ly > kDeadzone) ? 1 : (ly < -kDeadzone) ? -1 : 0;
-    if (pad.down(pico_toolset::kBtLeft)) j.x = -1;
-    else if (pad.down(pico_toolset::kBtRight)) j.x = 1;
-    if (pad.down(pico_toolset::kBtUp)) j.y = -1;
-    else if (pad.down(pico_toolset::kBtDown)) j.y = 1;
-    j.buttons = static_cast<uint8_t>((pad.down(pico_toolset::kBtA) ? 1 : 0) |
-                                     (pad.down(pico_toolset::kBtB) ? 2 : 0) |
-                                     (pad.down(pico_toolset::kBtX) ? 4 : 0) |
-                                     (pad.down(pico_toolset::kBtY) ? 8 : 0));
-    return j;
-}
-
 void post_key(int doomkey, bool down)
 {
     event_t ev;
@@ -192,7 +164,7 @@ extern "C" void i_input_reset_menu_input(void)
     g_prev_pad_back = pad.present && pad.down(pico_toolset::kBtBack);
     if (pad.present) {
         // Same derivation I_StartTic() uses, so the next ev_joystick edge compares against reality.
-        const Joy j = joystick_from(pad);
+        const picodoom::Joy j = picodoom::joystick_from(pad);
         g_prev_joy_x = j.x;
         g_prev_joy_y = j.y;
         g_prev_joy_buttons = j.buttons;
@@ -336,7 +308,7 @@ extern "C" void I_StartTic(void)
         }
 
         if (pad.present) {
-            const Joy j = joystick_from(pad);
+            const picodoom::Joy j = picodoom::joystick_from(pad);
             const uint8_t buttons = j.buttons;
             const int joyx = j.x, joyy = j.y;
 

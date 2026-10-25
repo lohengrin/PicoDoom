@@ -5,6 +5,7 @@
 // No engine edits: i_leds_update() diffs a snapshot of the console player's state each
 // poll (called from i_input_backend_poll(): every tic in game, every menu pass otherwise).
 // Dark outside a level. Flashes fade linearly over kFlashMs into the base colour.
+#include "led_colours.hpp"
 #include "pico_toolset/ws2812.h"
 #include "pico_toolset/ws2812_configs.h"
 
@@ -25,9 +26,8 @@ namespace {
 constexpr uint32_t kFlashMs = 450;
 constexpr float kBaseBrightness = 0.25f; // ambient level; flashes go to full
 
-struct Rgb { float r, g, b; };
-
-enum class Flash : uint8_t { None, Blue, Green, Red };
+using picodoom::Flash;
+using picodoom::Rgb;
 
 pico_toolset::Ws2812 g_leds;
 bool g_ok = false;
@@ -43,25 +43,6 @@ int g_powers[NUMPOWERS];
 Flash g_flash = Flash::None;
 uint32_t g_flash_start_ms = 0;
 uint32_t g_last_rgb = 0xFFFFFFFFu; // last frame pushed, to skip identical writes
-
-Rgb lerp(const Rgb& a, const Rgb& b, float t) {
-    return {a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t};
-}
-
-Rgb health_colour(int health) {
-    constexpr Rgb kGreen{0, 255, 0}, kOrange{255, 110, 0}, kRed{255, 0, 0};
-    const int hp = std::clamp(health, 0, 100);
-    return hp >= 50 ? lerp(kOrange, kGreen, static_cast<float>(hp - 50) / 50.0f)
-                    : lerp(kRed, kOrange, static_cast<float>(hp) / 50.0f);
-}
-
-Rgb flash_colour(Flash f) {
-    switch (f) {
-    case Flash::Red: return {255, 0, 0};
-    case Flash::Green: return {0, 255, 0};
-    default: return {0, 0, 255};
-    }
-}
 
 void snapshot(const player_t& p) {
     g_health = p.health;
@@ -141,14 +122,14 @@ void i_leds_update(void) {
         snapshot(p);
     }
 
-    Rgb c = health_colour(p.health);
+    Rgb c = picodoom::health_colour(p.health);
     c = {c.r * kBaseBrightness, c.g * kBaseBrightness, c.b * kBaseBrightness};
     if (g_flash != Flash::None) {
         const uint32_t age = now_ms - g_flash_start_ms;
         if (age >= kFlashMs)
             g_flash = Flash::None;
         else
-            c = lerp(c, flash_colour(g_flash), 1.0f - static_cast<float>(age) / static_cast<float>(kFlashMs));
+            c = picodoom::apply_flash(c, g_flash, age, kFlashMs);
     }
     show(c);
 }
