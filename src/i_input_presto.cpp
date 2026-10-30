@@ -13,6 +13,7 @@
 #include "pico_toolset/bluetooth.h"
 #include "pico_toolset/bluetooth_hid.h"
 #include "pico_toolset/bluetooth_hid_source.h"
+#include "pico_toolset/bluetooth_store.h"
 #include "pico_toolset/qwstpad.h"
 #include "pico_toolset/qwstpad_gamepad.h"
 #include "pico_toolset/qwstpad_configs.h"
@@ -162,6 +163,15 @@ extern "C" void presto_input_init(void)
     pico_toolset::BtHidDevice bonded[pico_toolset::BluetoothHid::kMaxBonded];
     const size_t n = g_hid.bonded_devices(bonded, pico_toolset::BluetoothHid::kMaxBonded);
     printf("PicoDoom: Bluetooth HID up, %u bonded device(s)\n", static_cast<unsigned>(n));
+    {
+        // Bonds live in BTstack's flash store, shared with every Pico-Toolset application built for
+        // this board: a device paired in one works in the others (docs/components/bluetooth-store.md in
+        // the toolset). Dump or erase it with picotool save/erase -r <address> ...
+        const pico_toolset::BluetoothStoreInfo si = pico_toolset::bluetooth_store_info();
+        printf("PicoDoom: bond store at 0x%08x (%u KB, %u link keys, %u LE bonds, format v%u) -- shared with other toolset apps\n",
+               static_cast<unsigned>(si.xip_address), static_cast<unsigned>(si.size_bytes / 1024),
+               si.link_key_slots, si.device_db_slots, si.format_version);
+    }
     if (n == 0)
         g_hid.start_pairing();
 #ifdef PICODOOM_A2DP
@@ -211,8 +221,25 @@ extern "C" const char* presto_bt_status(void)
     } else if (g_pairing_failed) {
         snprintf(text, sizeof(text), "Pairing failed");
     } else {
-        snprintf(text, sizeof(text), "BT: %u kbd  %u pad  %u mouse",
-                 g_hid.connected_keyboard_count(), g_hid.connected_gamepad_count(), g_hid.connected_mouse_count());
+        // Names of the connected devices (the toolset stores them with the bond, reads them from LE
+        // devices that were bonded without one and asks Classic devices for them); fall back to the kind.
+        pico_toolset::BtHidDevice dev[BluetoothHid::kMaxBonded];
+        const size_t n = g_hid.bonded_devices(dev, BluetoothHid::kMaxBonded);
+        size_t used = static_cast<size_t>(snprintf(text, sizeof(text), "BT: "));
+        unsigned connected = 0;
+        for (size_t i = 0; i < n && used < sizeof(text) - 1; ++i) {
+            if (!dev[i].connected)
+                continue;
+            const char* label = dev[i].name;
+            if (!label[0])
+                label = (dev[i].kinds & pico_toolset::bt_hid_kind::Gamepad) ? "gamepad"
+                        : (dev[i].kinds & pico_toolset::bt_hid_kind::Keyboard) ? "keyboard"
+                        : (dev[i].kinds & pico_toolset::bt_hid_kind::Mouse) ? "mouse" : "device";
+            used += static_cast<size_t>(snprintf(text + used, sizeof(text) - used, "%s%.20s", connected ? ", " : "", label));
+            ++connected;
+        }
+        if (connected == 0)
+            snprintf(text + used, sizeof(text) - used, "none connected (%u bonded)", static_cast<unsigned>(n));
     }
 #ifdef PICODOOM_A2DP
     if (g_bt_ok && g_passkey == 0) {

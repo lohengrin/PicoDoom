@@ -35,6 +35,10 @@ void add_widgets(const Ui& ui) {
     g_bt_label = lv_label_create(ui.screen);
     lv_label_set_text(g_bt_label, presto_bt_status());
     lv_obj_set_style_text_font(g_bt_label, &lv_font_montserrat_12, 0);
+    // Device names make the line long: fixed width, scrolling instead of wrapping over the buttons.
+    lv_obj_set_width(g_bt_label, ui.hor_res - 2 * scale_x(ui, 8));
+    lv_label_set_long_mode(g_bt_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_style_text_align(g_bt_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(g_bt_label, LV_ALIGN_BOTTOM_MID, 0, -scale_y(ui, 8 + 28 + 14));
     if (!ui.sd_available)
         return;

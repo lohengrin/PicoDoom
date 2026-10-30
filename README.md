@@ -120,7 +120,9 @@ picotool load -x -f build/PicoDoom.uf2
 - Presto: nothing to plug in. With nothing paired, the board starts Bluetooth pairing by
   itself: put your keyboard/gamepad/mouse in pairing mode (a keyboard shows a passkey in
   the boot menu: type it on the keyboard and press Enter). For a headset use *Pair audio*
-  in the boot menu with the headset in pairing mode; it reconnects on later boots.
+  in the boot menu with the headset in pairing mode; it reconnects on later boots. Pairings are stored in a flash
+  area shared with other Pico-Toolset applications (they survive reflashing, and a device paired in another toolset
+  application for the Presto works here without pairing again); see docs/PRESTO.md.
 - Power on — pick a WAD in the boot menu (or wait 30s for the last pick). Boot and
   diagnostic messages are available over the native USB port as a serial console
   (115200 8N1, or any terminal — USB CDC needs no baud negotiation).

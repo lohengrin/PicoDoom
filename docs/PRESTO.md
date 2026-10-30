@@ -82,3 +82,13 @@ Pico-Toolset: `St7701IndexedSource` + `st7701_indexed_rows.h` (indexed frame -> 
 `rp_util` (`IrqLock`, `bootsel_pressed()`, SRAM headroom). PicoDoom keeps only glue: `presto_mixer.cpp`, `presto_a2dp.cpp`,
 `i_sound_piezo.cpp`, `i_input_presto.cpp`, `i_leds_presto.cpp`, `i_video_presto.cpp`, `menu_board_presto.cpp`.
 
+## Bluetooth bond store (shared with other toolset applications)
+Pairings are kept in BTstack's flash store (two sectors just below the end of flash, outside the firmware image, so
+reflashing keeps them; `0x10FFD000` on the 16 MB Presto, printed at boot as "bond store at ..."). The toolset enforces a
+build-time contract (same slot counts, no `PICO_FLASH_BANK_*` overrides, `bluetooth_store.cpp`), so a keyboard, gamepad
+or headset paired in another toolset application for this board works here without re-pairing, and vice versa. Consequences:
+"Forget pad/Forget audio" in the boot menu removes the keys for every application, and the keys are not encrypted.
+`picotool save -r 0x10FFD000 0x10FFF000 bt-store.bin` dumps the store; `picotool erase -r ...` clears every bond.
+The menu's Bluetooth line shows the names of connected devices (stored with the bond; the toolset reads them from LE
+devices bonded without one and asks Classic devices for theirs).
+
