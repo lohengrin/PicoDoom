@@ -43,9 +43,7 @@ char g_name[24];
 volatile bool g_name_valid = false;
 A2dpState g_logged_state = A2dpState::Idle;
 
-// Diagnostics (printed every 5 s while streaming) and the connect chime.
-volatile uint32_t g_fill_calls = 0;
-uint64_t g_last_diag_us = 0;
+// The connect chime.
 uint32_t g_chime_left = 0, g_chime_phase = 0;
 
 class DoomSource final : public pico_toolset::AudioSource {
@@ -59,7 +57,6 @@ public:
 
     void fill(int16_t* pcm, size_t frames) override
     {
-        g_fill_calls = g_fill_calls + 1;
         static int16_t chunk[kMixerMaxChunk];
         const uint8_t ch = g_channels;
         while (frames > 0) {
@@ -131,21 +128,6 @@ void presto_a2dp_poll()
     if (!g_a2dp_ok)
         return;
     const A2dpState s = g_a2dp.state();
-    const uint64_t now_us = time_us_64();
-    if (s == A2dpState::Streaming) {
-        if (now_us - g_last_diag_us > 5'000'000) {
-            g_last_diag_us = now_us;
-            const pico_toolset::A2dpStats st = g_a2dp.stats();
-            const PrestoMixerStats ms = presto_mixer_take_stats();
-            printf("PicoDoom: audio: rate %u ch %u  fills %u  sfx %u music-chunks %u peak %u  "
-                   "packets %u dropped %u\n",
-                   static_cast<unsigned>(g_rate_hz), static_cast<unsigned>(g_channels),
-                   static_cast<unsigned>(g_fill_calls),
-                   static_cast<unsigned>(ms.sfx_started), static_cast<unsigned>(ms.music_chunks),
-                   static_cast<unsigned>(ms.peak), static_cast<unsigned>(st.packets_sent),
-                   static_cast<unsigned>(st.dropped_frames));
-        }
-    }
     if (s != g_logged_state) {
         if (s == A2dpState::Streaming) {
             g_chime_left = g_rate_hz / 4; // 250 ms
