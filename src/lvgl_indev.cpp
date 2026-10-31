@@ -49,6 +49,7 @@ extern "C" pico_toolset::DisplayPanel& i_video_lcd_display(void); // i_video_spi
 namespace {
 
 bool g_input_seen = false;
+lv_indev_t* g_keypad = nullptr;
 lv_obj_t* g_cursor = nullptr; // crosshair, hidden on the loading screen
 
 // ---------------------------------------------------------------------------
@@ -246,16 +247,6 @@ extern "C" void lvgl_indev_init_mouse(HidSource& usb, int canvas_w, int canvas_h
 }
 
 #if defined(PICODOOM_PRESTO)
-extern "C" bool lvgl_indev_touch_ft6236(int* x, int* y)
-{
-    const pico_toolset::TouchSample t = g_ft6236.read();
-    if (t.pressed) {
-        *x = t.raw_x;
-        *y = t.raw_y;
-    }
-    return t.pressed;
-}
-
 extern "C" void lvgl_indev_init_touch_ft6236(void)
 {
     g_ft6236.init(pico_toolset::configs::ft6236::kPimoroniPrestoFullRes);
@@ -281,6 +272,13 @@ extern "C" void lvgl_indev_init_keypad(HidSource& usb, lv_group_t* group)
     lv_indev_set_user_data(indev, &usb);
     if (group != nullptr)
         lv_indev_set_group(indev, group);
+    g_keypad = indev;
+}
+
+extern "C" void lvgl_indev_keypad_set_group(lv_group_t* group)
+{
+    if (g_keypad != nullptr)
+        lv_indev_set_group(g_keypad, group);
 }
 
 extern "C" bool lvgl_indev_input_seen(void)

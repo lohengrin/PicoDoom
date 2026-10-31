@@ -1,6 +1,6 @@
 #pragma once
 
-// What the Bluetooth page (src/bluetooth_page_presto.cpp) needs from the Presto's radio code.
+// What the Bluetooth page (src/menu_board_presto.cpp) needs from the Presto's radio code.
 #include "pico_toolset/bluetooth_hid.h"
 
 #ifdef PICODOOM_A2DP

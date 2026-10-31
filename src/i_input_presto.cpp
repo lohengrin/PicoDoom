@@ -166,7 +166,7 @@ extern "C" void presto_input_init(void)
 #endif
 }
 
-// -- Bluetooth page (src/bluetooth_page_presto.cpp) ----------------------------
+// -- Bluetooth page (src/menu_board_presto.cpp) ----------------------------
 bool presto_bt_available(void)
 {
     return g_bt_ok;

@@ -33,7 +33,7 @@ PSRAM, uSD (SPI0), piezo GPIO43, QW/ST I2C0 (QwSTPad 0x21), CYW43 radio used for
   `i_input_presto.cpp` (Bluetooth HID via `pico_toolset_bluetooth_hid` + QwSTPad D-pad/A/B/X/Y/+/-;
   QwSTPad is pad 0 and ORs into a Bluetooth pad). Pad Start (QwSTPad +) posts Esc, Back (-) posts Tab,
   on every backend. Touch = FT6236 indev for the boot menu, whose *Bluetooth* button (only when the radio came up)
-  runs Pico-Toolset's common Bluetooth page (`libs/bluetooth_ui`, `bluetooth_page_presto.cpp`) on the menu surface:
+  runs Pico-Toolset's common Bluetooth page (its LVGL view, `libs/bluetooth_ui_lvgl`, opened over the menu by `menu_board_presto.cpp`):
   pair new / connect / disconnect / forget for HID and the headset, keyboard passkey. Pairing is manual
   (`auto_pair`/`auto_connect` off); bonded devices reconnect by themselves. Gamepad button order for Bluetooth pads is a guess upstream
   (`gamepad_raw_buttons()` shows the real usages).
