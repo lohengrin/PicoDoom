@@ -8,6 +8,7 @@
 // chime. Nothing here blocks or prints from the Bluetooth context.
 #include "pico_toolset/bluetooth_a2dp.h"
 #include "pico_toolset/irq_lock.h"
+#include "presto_bluetooth.hpp"
 #include "presto_mixer.hpp"
 #include "pico_toolset/audio_source.h"
 #include "pico_toolset/psram.h"
@@ -103,6 +104,7 @@ void presto_a2dp_init()
     cfg.quality = pico_toolset::A2dpQuality::Mono; // mono mixer; leaves radio time for the pad
     cfg.source = &g_source;
     cfg.callback = on_event;
+    cfg.auto_connect = false; // the Bluetooth page (menu) lists what it finds and the user picks
     cfg.local_name = "PicoDoom";
     cfg.initial_volume = 64;
     g_a2dp_ok = g_a2dp.init(cfg);
@@ -158,39 +160,7 @@ void presto_a2dp_poll()
     }
 }
 
-void presto_a2dp_start_pairing()
+pico_toolset::BluetoothA2dp* presto_a2dp_device()
 {
-    if (g_a2dp_ok)
-        g_a2dp.start_pairing();
+    return g_a2dp_ok ? &g_a2dp : nullptr;
 }
-
-void presto_a2dp_forget()
-{
-    if (g_a2dp_ok) {
-        g_a2dp.disconnect();
-        g_a2dp.forget_last();
-        g_name_valid = false;
-    }
-}
-
-// Menu status text ("Audio: ...").
-const char* presto_a2dp_status()
-{
-    static char text[48];
-    if (!g_a2dp_ok) {
-        snprintf(text, sizeof(text), "Audio: unavailable");
-        return text;
-    }
-    const char* name = g_name_valid ? g_name : (g_a2dp.has_last_device() ? g_a2dp.last_device().name : "");
-    switch (g_a2dp.state()) {
-    case A2dpState::Pairing: snprintf(text, sizeof(text), "Audio: pairing (headset in pairing mode)"); break;
-    case A2dpState::Connecting: snprintf(text, sizeof(text), "Audio: connecting %s", name); break;
-    case A2dpState::Connected: snprintf(text, sizeof(text), "Audio: %s connected", name); break;
-    case A2dpState::Streaming: snprintf(text, sizeof(text), "Audio: %s", name); break;
-    default:
-        snprintf(text, sizeof(text), name[0] ? "Audio: %s (off)" : "Audio: piezo", name);
-        break;
-    }
-    return text;
-}
-

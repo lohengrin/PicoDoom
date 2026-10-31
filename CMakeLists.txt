@@ -109,7 +109,11 @@ endforeach()
 set(PICO_TOOLSET_BUILD_BLUETOOTH OFF CACHE BOOL "" FORCE)
 set(PICO_TOOLSET_BUILD_BLUETOOTH_HID OFF CACHE BOOL "" FORCE)
 set(PICO_TOOLSET_BUILD_BLUETOOTH_A2DP OFF CACHE BOOL "" FORCE)
+set(PICO_TOOLSET_BUILD_SCREEN OFF CACHE BOOL "" FORCE)
+set(PICO_TOOLSET_BUILD_BLUETOOTH_UI OFF CACHE BOOL "" FORCE)
 if(PICODOOM_VIDEO_OUTPUT STREQUAL "presto")
+    set(PICO_TOOLSET_BUILD_SCREEN ON CACHE BOOL "" FORCE)           # DisplayDriver, used by the Bluetooth page
+    set(PICO_TOOLSET_BUILD_BLUETOOTH_UI ON CACHE BOOL "" FORCE)
     set(PICO_TOOLSET_BUILD_ILI9486 OFF CACHE BOOL "" FORCE)
     set(PICO_TOOLSET_BUILD_ST7796 OFF CACHE BOOL "" FORCE)
     set(PICO_TOOLSET_BUILD_DVI_HDMI OFF CACHE BOOL "" FORCE)
@@ -206,7 +210,7 @@ set(PICODOOM_MENU_SRC
 if(PICODOOM_VIDEO_OUTPUT STREQUAL "hdmi")
     list(APPEND PICODOOM_MENU_SRC src/lvgl_display_dvi.cpp src/menu_board_hdmi.cpp)
 elseif(PICODOOM_VIDEO_OUTPUT STREQUAL "presto")
-    list(APPEND PICODOOM_MENU_SRC src/lvgl_display_presto.cpp src/menu_board_presto.cpp)
+    list(APPEND PICODOOM_MENU_SRC src/lvgl_display_presto.cpp src/menu_board_presto.cpp src/bluetooth_page_presto.cpp)
 else()
     list(APPEND PICODOOM_MENU_SRC src/lvgl_display_lcd.cpp src/menu_board_spi_lcd.cpp)
 endif()
@@ -415,6 +419,7 @@ target_link_libraries(PicoDoom
     $<$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},presto>:pico_toolset_ws2812>
     $<$<AND:$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},presto>,$<BOOL:${PICODOOM_PRESTO_A2DP}>>:pico_toolset_bluetooth_a2dp>
     $<$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},presto>:pico_toolset_bluetooth_hid>
+    $<$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},presto>:pico_toolset_bluetooth_ui>
     $<$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},lcd>:pico_toolset_xpt2046>
     $<$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},lcd-st7796>:pico_toolset_xpt2046>
     $<$<NOT:$<STREQUAL:${PICODOOM_VIDEO_OUTPUT},presto>>:pico_toolset_usb_hid>

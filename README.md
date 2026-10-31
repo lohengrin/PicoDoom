@@ -117,10 +117,10 @@ picotool load -x -f build/PicoDoom.uf2
   `doom2.wad`, ...) at its root.
 - PiZero: plug in a USB keyboard (and optionally a mouse or gamepad) via the board's
   PIO-USB port.
-- Presto: nothing to plug in. With nothing paired, the board starts Bluetooth pairing by
-  itself: put your keyboard/gamepad/mouse in pairing mode (a keyboard shows a passkey in
-  the boot menu: type it on the keyboard and press Enter). For a headset use *Pair audio*
-  in the boot menu with the headset in pairing mode; it reconnects on later boots. Pairings are stored in a flash
+- Presto: nothing to plug in. Open *Bluetooth* in the boot menu (bottom right; Pico-Toolset's common
+  Bluetooth page): *Pair new* scans for keyboards, gamepads, mice and headsets in pairing mode, pick one
+  (a keyboard shows a passkey: type it and press Enter). Paired devices are listed with their state and
+  can be connected, disconnected or forgotten there; they reconnect on later boots. Pairings are stored in a flash
   area shared with other Pico-Toolset applications (they survive reflashing, and a device paired in another toolset
   application for the Presto works here without pairing again); see docs/PRESTO.md.
 - Power on — pick a WAD in the boot menu (or wait 30s for the last pick). Boot and

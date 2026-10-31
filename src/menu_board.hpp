@@ -4,7 +4,7 @@
 // driver and touch controller to bring up, what extra controls the board adds, and what to refresh
 // while the menu runs. One implementation per board, picked by CMake:
 //   menu_board_spi_lcd.cpp (ILI9486 / ST7796U + XPT2046), menu_board_hdmi.cpp (DVI canvas, no touch),
-//   menu_board_presto.cpp (ST7701 + FT6236, Bluetooth pairing controls).
+//   menu_board_presto.cpp (ST7701 + FT6236, Bluetooth button).
 #include "lvgl.h"
 
 namespace menu_board {

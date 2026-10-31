@@ -32,9 +32,10 @@ PSRAM, uSD (SPI0), piezo GPIO43, QW/ST I2C0 (QwSTPad 0x21), CYW43 radio used for
   posting is `src/i_input_tic.cpp` (`I_StartTic`), backends are `i_input_usbhid.cpp` (PiZero) and
   `i_input_presto.cpp` (Bluetooth HID via `pico_toolset_bluetooth_hid` + QwSTPad D-pad/A/B/X/Y/+/-;
   QwSTPad is pad 0 and ORs into a Bluetooth pad). Pad Start (QwSTPad +) posts Esc, Back (-) posts Tab,
-  on every backend. Touch = FT6236 indev for the boot menu, which also has Pair BT / Forget buttons
-  and a status line (passkey for keyboards). Bonded devices reconnect by themselves; pairing starts
-  automatically when nothing is bonded. Gamepad button order for Bluetooth pads is a guess upstream
+  on every backend. Touch = FT6236 indev for the boot menu, whose *Bluetooth* button (only when the radio came up)
+  runs Pico-Toolset's common Bluetooth page (`libs/bluetooth_ui`, `bluetooth_page_presto.cpp`) on the menu surface:
+  pair new / connect / disconnect / forget for HID and the headset, keyboard passkey. Pairing is manual
+  (`auto_pair`/`auto_connect` off); bonded devices reconnect by themselves. Gamepad button order for Bluetooth pads is a guess upstream
   (`gamepad_raw_buttons()` shows the real usages).
 - **Audio** (`src/presto_mixer.cpp`, `src/i_sound_piezo.cpp`): one shared mono mixer (toolset `SampleMixer<8>` for the 8 DMX voices with
   linear interpolation/pitch/volume + the MUS synth `mus_render()`), rendered on demand by whichever output is
@@ -55,8 +56,7 @@ PSRAM, uSD (SPI0), piezo GPIO43, QW/ST I2C0 (QwSTPad 0x21), CYW43 radio used for
   to every `mus_*` call is wrapped in a short interrupt-off `IrqLock` so the Bluetooth context never sees a
   half-updated state; mixing buffers are static (the BT context runs on core 0's 4 KB stack). BOOTSEL mute =
   `presto_mixer_set_enabled(false)` (silence, music not rendered). SBC preset `Mono` (154 kbps). The last headset
-  reconnects after boot; the boot menu has Pair/Forget buttons for pad/keyboard and for audio and a combined status
-  line. A headset starting to stream unmutes. Costs ~36 KB SRAM (AVDTP/AVRCP pools, 1 KB ACL buffers,
+  reconnects after boot; the headset is managed on the menu's Bluetooth page (`BtUiA2dpBackend`). A headset starting to stream unmutes. Costs ~36 KB SRAM (AVDTP/AVRCP pools, 1 KB ACL buffers,
   `PICO_STACK_SIZE=0x1000`; core1 stack 6 KB; `states[]`/`mobjinfo[]` relocation pays it back, heap ~315 KB).
   Bluetooth mice work through the same HID path (motion, buttons, wheel = weapon cycle; the menu cursor shows only
   while a mouse is present). Console diagnostics every 5 s while streaming (`PicoDoom: audio: ...`).
@@ -87,7 +87,7 @@ Pairings are kept in BTstack's flash store (two sectors just below the end of fl
 reflashing keeps them; `0x10FFD000` on the 16 MB Presto, printed at boot as "bond store at ..."). The toolset enforces a
 build-time contract (same slot counts, no `PICO_FLASH_BANK_*` overrides, `bluetooth_store.cpp`), so a keyboard, gamepad
 or headset paired in another toolset application for this board works here without re-pairing, and vice versa. Consequences:
-"Forget pad/Forget audio" in the boot menu removes the keys for every application, and the keys are not encrypted.
+Forgetting a device on the Bluetooth page removes the keys for every application, and the keys are not encrypted.
 `picotool save -r 0x10FFD000 0x10FFF000 bt-store.bin` dumps the store; `picotool erase -r ...` clears every bond.
 The menu's Bluetooth line shows the names of connected devices (stored with the bond; the toolset reads them from LE
 devices bonded without one and asks Classic devices for theirs).

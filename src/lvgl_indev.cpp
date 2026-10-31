@@ -246,6 +246,16 @@ extern "C" void lvgl_indev_init_mouse(HidSource& usb, int canvas_w, int canvas_h
 }
 
 #if defined(PICODOOM_PRESTO)
+extern "C" bool lvgl_indev_touch_ft6236(int* x, int* y)
+{
+    const pico_toolset::TouchSample t = g_ft6236.read();
+    if (t.pressed) {
+        *x = t.raw_x;
+        *y = t.raw_y;
+    }
+    return t.pressed;
+}
+
 extern "C" void lvgl_indev_init_touch_ft6236(void)
 {
     g_ft6236.init(pico_toolset::configs::ft6236::kPimoroniPrestoFullRes);
@@ -281,6 +291,11 @@ extern "C" bool lvgl_indev_input_seen(void)
 extern "C" void lvgl_indev_input_seen_clear(void)
 {
     g_input_seen = false;
+}
+
+extern "C" void lvgl_indev_input_seen_set(void)
+{
+    g_input_seen = true;
 }
 
 extern "C" void lvgl_indev_hide_cursor(void)
