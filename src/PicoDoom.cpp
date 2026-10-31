@@ -18,9 +18,19 @@ void I_RelocateInfoTables(void); // doom/info.c
 }
 
 #include "pico_toolset/psram.h"
+#include "pico_toolset/sram.h"
 #include "pico_toolset/fault_handler.h"
 #include "board_config.hpp"
 extern "C" bool sd_init(void);
+
+namespace {
+void log_sram(const char* where)
+{
+    printf("PicoDoom: SRAM %s: free %u KB, largest block above the break %u KB\n", where,
+           static_cast<unsigned>(pico_toolset::sram_free_estimate() / 1024),
+           static_cast<unsigned>(pico_toolset::sram_contiguous_free() / 1024));
+}
+} // namespace
 #ifdef PICODOOM_RUNTIME_RES
 extern "C" void i_video_lcd_set_hires(int hires); // src/i_video_{ili9486,st7796}.cpp
 #endif
@@ -199,6 +209,7 @@ int main(void)
 #if defined(PICODOOM_PRESTO)
     printf("PicoDoom: QwSTPad + Bluetooth HID init...\n");
     presto_input_init();
+    log_sram("after Bluetooth init");
 #elif defined(PICODOOM_SPI_LCD)
     printf("PicoDoom: USB-PIO keyboard host init (core1)...\n");
     usb_hid_core1_init();
@@ -214,7 +225,9 @@ int main(void)
     // pico_hires starts at 0 (BSS); seed it with the persisted/default value
     // so the no-uSD path (no checkbox) still picks the right mode.
     pico_hires = pico_hires_setting();
+    log_sram("before boot menu");
     wad_menu_run(sd_available);
+    log_sram("after boot menu");
 #ifdef PICODOOM_RUNTIME_RES
     i_video_lcd_set_hires(pico_hires);
 #endif

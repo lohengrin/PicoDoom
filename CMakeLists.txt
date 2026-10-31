@@ -428,6 +428,10 @@ target_link_libraries(PicoDoom
     lvgl::lvgl
 )
 
+# The engine has a handful of files open at once (WADs, config, savegame): 8 FatFs file objects
+# (~600 bytes each) are plenty, the default 12 cost 2.4 KB of SRAM more.
+target_compile_definitions(pico_toolset_sdcard PRIVATE PICO_TOOLSET_SDCARD_STDIO_MAX_FDS=8)
+
 target_include_directories(PicoDoom PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/doom
     ${CMAKE_CURRENT_SOURCE_DIR}/src
