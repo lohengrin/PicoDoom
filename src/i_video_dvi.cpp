@@ -151,7 +151,13 @@ dvi_inst g_dvi;
 // 153600 bytes total.
 alignas(4) uint16_t g_framebuf[kCanvasW * kCanvasH];
 
-uint16_t g_rgb565_lut[256];
+// Game mode: the first kCanvasW*kCanvasH bytes of g_framebuf are 8-bit palette indices (set by the first
+// I_FinishUpdate()); until then (boot menu) it is the LVGL RGB565 canvas. core1 expands either to full
+// 8-bit R/G/B planes per row and encodes them with the 8bpp TMDS path: no RGB565 truncation (banding)
+// and no zero-padded low bits (white at 0xF8/0xFC, per-channel tint).
+volatile bool g_indexed = false;
+uint8_t g_pal_plane[3][256]; // R, G, B per palette index, gamma applied; core0 writes, core1 reads
+alignas(4) uint8_t g_row_plane[3][kCanvasW]; // core1 only
 // Gamma factor applied at RGB565-LUT-build time (set from the serial
 // console, src/i_serial_console.cpp; F3/F4 keys that used to tune it are
 // freed for vanilla DOOM) -- same live-tunable brighten/darken curve the LCD
@@ -176,10 +182,10 @@ picodoom::GammaPalette g_pal;
 // cost, not per frame.
 void rebuild_rgb565_lut() {
     for (int i = 0; i < 256; ++i) {
-        // Native-endian RGB565 -- no SPI-wire byte-swap needed here, unlike
-        // src/i_video_spi_lcd.cpp's LUT (this encoder reads native uint32
-        // words, see encode_row()).
-        g_rgb565_lut[i] = picodoom::GammaPalette::rgb565(g_pal.color(i));
+        const picodoom::Rgb8 c = g_pal.color(i);
+        g_pal_plane[0][i] = c.r;
+        g_pal_plane[1][i] = c.g;
+        g_pal_plane[2][i] = c.b;
     }
 }
 
@@ -258,18 +264,38 @@ void report_stats_if_due(uint64_t now_us) {
 // -- the encoder duplicates each source pixel to 2 physical columns
 // itself), just reading straight from g_framebuf's row cursor (a plain CPU
 // load -- see file header) instead of popping from q_colour_valid.
-void __not_in_flash_func(encode_row)(const uint16_t* row) {
+void __not_in_flash_func(encode_row)(int row) {
+    if (g_indexed) {
+        const uint8_t* src = reinterpret_cast<const uint8_t*>(g_framebuf) + static_cast<size_t>(row) * kCanvasW;
+        const uint8_t* pr = g_pal_plane[0];
+        const uint8_t* pg = g_pal_plane[1];
+        const uint8_t* pb = g_pal_plane[2];
+        for (int x = 0; x < kCanvasW; ++x) {
+            const uint8_t i = src[x];
+            g_row_plane[0][x] = pr[i];
+            g_row_plane[1][x] = pg[i];
+            g_row_plane[2][x] = pb[i];
+        }
+    } else {
+        const uint16_t* src = g_framebuf + static_cast<size_t>(row) * kCanvasW;
+        for (int x = 0; x < kCanvasW; ++x) {
+            const uint32_t v = src[x];
+            const uint32_t r = v >> 11, g = (v >> 5) & 0x3F, b = v & 0x1F;
+            g_row_plane[0][x] = static_cast<uint8_t>((r << 3) | (r >> 2));
+            g_row_plane[1][x] = static_cast<uint8_t>((g << 2) | (g >> 4));
+            g_row_plane[2][x] = static_cast<uint8_t>((b << 3) | (b >> 2));
+        }
+    }
     uint32_t* tmdsbuf;
     queue_remove_blocking_u32(&g_dvi.q_tmds_free, &tmdsbuf);
     const uint pixwidth = g_dvi.timing->h_active_pixels;
     const uint words_per_channel = pixwidth / DVI_SYMBOLS_PER_WORD;
-    const auto* pix = reinterpret_cast<const uint32_t*>(row);
-    tmds_encode_data_channel_16bpp(pix, tmdsbuf + 0 * words_per_channel, pixwidth / 2,
-                                   DVI_16BPP_BLUE_MSB, DVI_16BPP_BLUE_LSB);
-    tmds_encode_data_channel_16bpp(pix, tmdsbuf + 1 * words_per_channel, pixwidth / 2,
-                                   DVI_16BPP_GREEN_MSB, DVI_16BPP_GREEN_LSB);
-    tmds_encode_data_channel_16bpp(pix, tmdsbuf + 2 * words_per_channel, pixwidth / 2,
-                                   DVI_16BPP_RED_MSB, DVI_16BPP_RED_LSB);
+    tmds_encode_data_channel_8bpp(reinterpret_cast<const uint32_t*>(g_row_plane[2]), tmdsbuf + 0 * words_per_channel,
+                                  pixwidth / 2, 7, 0);
+    tmds_encode_data_channel_8bpp(reinterpret_cast<const uint32_t*>(g_row_plane[1]), tmdsbuf + 1 * words_per_channel,
+                                  pixwidth / 2, 7, 0);
+    tmds_encode_data_channel_8bpp(reinterpret_cast<const uint32_t*>(g_row_plane[0]), tmdsbuf + 2 * words_per_channel,
+                                  pixwidth / 2, 7, 0);
     queue_add_blocking_u32(&g_dvi.q_tmds_valid, &tmdsbuf);
 }
 
@@ -281,7 +307,7 @@ void __not_in_flash_func(core1_entry)() {
     dvi_register_irqs_this_core(&g_dvi, DMA_IRQ_0);
     dvi_start(&g_dvi);
     for (;;) {
-        encode_row(g_framebuf + static_cast<size_t>(g_row) * kCanvasW);
+        encode_row(g_row);
         g_row = (g_row + 1) % kCanvasH;
     }
 }
@@ -355,24 +381,15 @@ void I_FinishUpdate(void) {
     // need for the invalidate()/re-paint-on-change dance TOM6809's
     // multi-screen-mode renderer needs.
     if (!g_border_painted) {
-        std::fill(g_framebuf, g_framebuf + static_cast<size_t>(kBorderRows) * kCanvasW, static_cast<uint16_t>(0));
-        std::fill(g_framebuf + static_cast<size_t>(kBorderRows + kSrcRows) * kCanvasW,
-                  g_framebuf + static_cast<size_t>(kCanvasH) * kCanvasW, static_cast<uint16_t>(0));
+        memset(g_framebuf, 0, sizeof(g_framebuf));
+        g_indexed = true;
         g_border_painted = true;
     }
 
     // screens[0] itself is never touched here (see file header) -- just
-    // read out. Straight palette->RGB565 copy, no scaling in this loop at
-    // all: kCanvasW==kSrcCols (320), and both the horizontal 2x (the
-    // encoder, see encode_row()) and vertical 2x (DVI_VERTICAL_REPEAT) are
-    // hardware/library doubling, not anything this loop needs to do.
-    const byte* src = screens[0];
-    for (int row = 0; row < kSrcRows; ++row) {
-        const byte* src_row = src + static_cast<size_t>(row) * kSrcCols;
-        uint16_t* dst_row = g_framebuf + static_cast<size_t>(kBorderRows + row) * kCanvasW;
-        for (int col = 0; col < kSrcCols; ++col)
-            dst_row[col] = g_rgb565_lut[src_row[col]];
-    }
+    // read out. Plain index copy: palette, gamma and 8-bit expansion happen on core1.
+    uint8_t* dst = reinterpret_cast<uint8_t*>(g_framebuf) + static_cast<size_t>(kBorderRows) * kCanvasW;
+    memcpy(dst, screens[0], static_cast<size_t>(kSrcRows) * kSrcCols);
 
     uint64_t now_us = time_us_64();
     g_convert_us_in_window += now_us - frame_start_us;

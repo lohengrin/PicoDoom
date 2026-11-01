@@ -119,6 +119,16 @@ float* g_mix_r = nullptr;
 
 dvi_inst* g_dvi = nullptr;
 
+// DOOM's default sfx/music volume (8/15) and the centre-pan law leave the mix around -8 dB FS, and the
+// music synth runs well under that; make up for it here and let soft_clip() tame the peaks.
+constexpr float kOutputGain = 2.5f;
+
+// Cubic knee: identity-ish near 0, saturates smoothly at +-1 (reached at +-1.5 input).
+inline float soft_clip(float x) {
+    x = std::clamp(x, -1.5f, 1.5f);
+    return x - (4.0f / 27.0f) * x * x * x;
+}
+
 // 8-byte DMX lump header (doom/i_sound.c's getsfx() is the reference for
 // this layout) -- read directly from the cached lump, no copy.
 struct DmxHeader {
@@ -243,8 +253,8 @@ void mix_tic() {
     uint32_t wpos = audio_ring_get_write_offset(&ring);
     uint32_t mask = ring.size - 1;
     for (uint32_t i = 0; i < to_write; ++i) {
-        float l = std::clamp(g_mix_l[i], -1.0f, 1.0f);
-        float r = std::clamp(g_mix_r[i], -1.0f, 1.0f);
+        float l = soft_clip(g_mix_l[i] * kOutputGain);
+        float r = soft_clip(g_mix_r[i] * kOutputGain);
         buf[wpos].channels[0] = static_cast<int16_t>(l * 32767.0f);
         buf[wpos].channels[1] = static_cast<int16_t>(r * 32767.0f);
         wpos = (wpos + 1) & mask;
