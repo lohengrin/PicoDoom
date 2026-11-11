@@ -15,7 +15,7 @@ two RP2350B boards, both with 16MB flash, 8MB PSRAM and a µSD card:
 |---|---|---|---|
 | `lcd` (default) | 3.5" ILI9486 SPI LCD (480x320) | 320x200 or 480x300 (boot-menu choice) | none |
 | `lcd-st7796` | ST7796U SPI LCD (480x320), 132MHz SPI | 320x200 or 480x300 | none |
-| `hdmi` | onboard DVI/HDMI connector (640x480) | 320x200 | SFX + music over HDMI |
+| `hdmi` | onboard DVI/HDMI connector (640x400 @ 70 Hz, vsync-locked, no tearing) | 320x200 | SFX + music over HDMI |
 | `presto` | Presto's 480x480 ST7701 panel (game in the top 480x300, black band below) | 320x200 scaled 1.5x, or native 480x300 | piezo, or SFX + music to a Bluetooth headset |
 
 - **Video (LCD)**: the palette-indexed framebuffer lives in SRAM, is converted to

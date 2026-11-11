@@ -125,6 +125,11 @@ byte* I_ZoneBase (int*	size)
 // I_GetTime
 // returns time in 1/70th second tics
 //
+#ifdef PICODOOM_HDMI
+/* display frame counter (src/i_video_dvi.cpp): -1 until scan-out runs, then 70 Hz = 2 per tic */
+extern int i_video_dvi_vsync_count(void);
+#endif
+
 int  I_GetTime (void)
 {
     struct timeval	tp;
@@ -136,6 +141,23 @@ int  I_GetTime (void)
     if (!basetime)
 	basetime = tp.tv_sec;
     newtics = (tp.tv_sec-basetime)*TICRATE + tp.tv_usec*TICRATE/1000000;
+#ifdef PICODOOM_HDMI
+    {
+	/* tics follow the display (70 Hz / 2) so frames and game time never beat against each other;
+	   the offset keeps the clock continuous when it switches over from the wall clock */
+	static int	vsync_offset, vsync_locked;
+	int		v = i_video_dvi_vsync_count();
+	if (v >= 0)
+	{
+	    if (!vsync_locked)
+	    {
+		vsync_offset = newtics - v/2;
+		vsync_locked = 1;
+	    }
+	    return v/2 + vsync_offset;
+	}
+    }
+#endif
     return newtics;
 }
 

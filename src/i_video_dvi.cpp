@@ -14,7 +14,7 @@
 // and feeding it once per Doom tic (which can exceed its 16.67ms deadline)
 // wedges it into a permanent solid-red screen -- exactly the failure
 // TOM6809 hit and fixed. Instead: one persistent RGB565 framebuffer in SRAM
-// that core1 re-encodes continuously at the DVI's own 60Hz, independent of
+// that core1 re-encodes continuously at the DVI's own 70Hz, independent of
 // how often core0 actually has a new Doom frame ready, via plain CPU loads
 // (no DMA indirection -- see below) -- core0 just writes into it whenever
 // I_FinishUpdate() runs; worst case a frame tears, never blanks or wedges.
@@ -77,7 +77,7 @@
 // clk_sys: src/PicoDoom.cpp's main() sets clk_sys to exactly 252MHz for
 // this build (not the LCD build's 200MHz) -- this library's PIO/TMDS
 // serialiser derives its bit clock from whatever clk_sys is at
-// dvi_init() time, and dvi_timing_640x480p_60hz requires exactly 252MHz
+// dvi_init() time, and dvi_timing_640x400p_70hz requires exactly 252MHz
 // (see that file's own comment for the full real-hardware-confirmed
 // rationale).
 #include "dvi.h"
@@ -128,26 +128,26 @@ bool g_graphics_init_done = false;
 
 // Canvas pixel dimensions -- see file header's scaling rationale.
 // DVI_VERTICAL_REPEAT (dvi_config_defs.h, default 2) doubles each canvas
-// row to 2 physical scanlines, so kCanvasH=240 produces the full 480-line
+// row to 2 physical scanlines, so kCanvasH=200 produces the full 400-line
 // active picture. kCanvasW=320 (not 640): the non-fullres 16bpp TMDS
 // encoder used below (encode_row()) doubles each source column to 2
 // physical columns internally, so the framebuffer itself stays source
 // (320) width, not physical (640) width.
 constexpr int kCanvasW = 320;
-constexpr int kCanvasH = 240;
+constexpr int kCanvasH = 200;
 
 constexpr int kSrcRows = SCREENHEIGHT;  // 200
 constexpr int kSrcCols = SCREENWIDTH;   // 320
-constexpr int kBorderRows = (kCanvasH - kSrcRows) / 2; // 20
+constexpr int kBorderRows = (kCanvasH - kSrcRows) / 2; // 0
 
 dvi_inst g_dvi;
 
 // THE framebuffer -- a single, persistent, always-valid RGB565 image core1
-// re-encodes continuously at the DVI's 60Hz, independently of core0's own
+// re-encodes continuously at the DVI's 70Hz, independently of core0's own
 // (much less regular) Doom-tic rate. Plain SRAM (.bss) -- see file header
 // for why, and for why this is affordable now (doom/w_wad.c's own large
 // allocations moved to PSRAM to make room). alignas(4): the encoder takes
-// a `const uint32_t*` (320*2=640-byte rows stay 4-aligned). 320*240*2 =
+// a `const uint32_t*` (320*2=640-byte rows stay 4-aligned). 320*200*2 =
 // 153600 bytes total.
 alignas(4) uint16_t g_framebuf[kCanvasW * kCanvasH];
 
@@ -156,6 +156,17 @@ alignas(4) uint16_t g_framebuf[kCanvasW * kCanvasH];
 // 8-bit R/G/B planes per row and encodes them with the 8bpp TMDS path: no RGB565 truncation (banding)
 // and no zero-padded low bits (white at 0xF8/0xFC, per-channel tint).
 volatile bool g_indexed = false;
+// Game mode is double-buffered: g_framebuf's 128000 bytes hold two 320x200 index images. core0 copies a
+// finished frame into the buffer that is not being scanned and posts it in g_pending; core1 latches it into
+// g_front when it starts encoding row 0 (i.e. in vertical blanking), so a frame is never torn. core0 blocks in
+// I_FinishUpdate() while a posted frame is still waiting, which is what locks the engine to the display.
+constexpr int kFrameBytes = kCanvasW * kCanvasH;
+static_assert(2 * kFrameBytes <= kCanvasW * kCanvasH * 2, "two index frames must fit g_framebuf");
+constexpr int kNoPending = -1;
+volatile int g_front = 0;
+volatile int g_pending = kNoPending;
+// Frames started since scan-out began (-1 before); 70 Hz, so DOOM's 35 Hz tic clock is g_vcount / 2.
+volatile int g_vcount = -1;
 uint8_t g_pal_plane[3][256]; // R, G, B per palette index, gamma applied; core0 writes, core1 reads
 alignas(4) uint8_t g_row_plane[3][kCanvasW]; // core1 only
 // Gamma factor applied at RGB565-LUT-build time (set from the serial
@@ -206,6 +217,9 @@ int g_row = 0;
 
 bool g_border_painted = false;
 
+// core1 per-row work time (expand + TMDS encode, excluding the wait for a free buffer), for the stats line
+volatile uint32_t g_c1_work_us = 0, g_c1_rows = 0, g_c1_max_us = 0;
+
 // --- Stats line (SRAM/PSRAM usage, FPS, convert time) ---
 // Same intent as src/i_video_spi_lcd.cpp's stats line, trimmed: there's no
 // core0<->core1 handoff/backpressure left to report (core1 free-runs,
@@ -243,6 +257,13 @@ void report_stats_if_due(uint64_t now_us) {
                         &bsp_walls_pct, &planes_pct, &sprites_pct);
     uint32_t wad_cache_misses = i_frame_stats_take_wad_cache_misses();
 
+    const uint32_t c1_rows = g_c1_rows;
+    printf("PicoDoom: core1 row work avg %.1fus max %uus (budget 63us)  late scanlines %u total\n",
+           c1_rows ? static_cast<float>(g_c1_work_us) / static_cast<float>(c1_rows) : 0.0f,
+           static_cast<unsigned>(g_c1_max_us), static_cast<unsigned>(g_dvi.late_scanlines_total));
+    g_c1_work_us = 0;
+    g_c1_rows = 0;
+    g_c1_max_us = 0;
     printf("PicoDoom: SRAM %u/%uKB  PSRAM %u/%uKB  FPS %.1f  core0-convert %.0f%%  "
            "tic %.0f%%  render3d %.0f%% (bsp+walls %.0f%%  planes %.0f%%  sprites %.0f%%)  draw2d %.0f%%  "
            "wad-cache-miss %u/10s\n",
@@ -265,8 +286,10 @@ void report_stats_if_due(uint64_t now_us) {
 // itself), just reading straight from g_framebuf's row cursor (a plain CPU
 // load -- see file header) instead of popping from q_colour_valid.
 void __not_in_flash_func(encode_row)(int row) {
+    const uint32_t t0 = time_us_32();
     if (g_indexed) {
-        const uint8_t* src = reinterpret_cast<const uint8_t*>(g_framebuf) + static_cast<size_t>(row) * kCanvasW;
+        const uint8_t* src = reinterpret_cast<const uint8_t*>(g_framebuf) +
+                             static_cast<size_t>(g_front) * kFrameBytes + static_cast<size_t>(row) * kCanvasW;
         const uint8_t* pr = g_pal_plane[0];
         const uint8_t* pg = g_pal_plane[1];
         const uint8_t* pb = g_pal_plane[2];
@@ -286,8 +309,10 @@ void __not_in_flash_func(encode_row)(int row) {
             g_row_plane[2][x] = static_cast<uint8_t>((b << 3) | (b >> 2));
         }
     }
+    const uint32_t t1 = time_us_32();
     uint32_t* tmdsbuf;
     queue_remove_blocking_u32(&g_dvi.q_tmds_free, &tmdsbuf);
+    const uint32_t t2 = time_us_32();
     const uint pixwidth = g_dvi.timing->h_active_pixels;
     const uint words_per_channel = pixwidth / DVI_SYMBOLS_PER_WORD;
     tmds_encode_data_channel_8bpp(reinterpret_cast<const uint32_t*>(g_row_plane[2]), tmdsbuf + 0 * words_per_channel,
@@ -297,6 +322,11 @@ void __not_in_flash_func(encode_row)(int row) {
     tmds_encode_data_channel_8bpp(reinterpret_cast<const uint32_t*>(g_row_plane[0]), tmdsbuf + 2 * words_per_channel,
                                   pixwidth / 2, 7, 0);
     queue_add_blocking_u32(&g_dvi.q_tmds_valid, &tmdsbuf);
+    const uint32_t work = (t1 - t0) + (time_us_32() - t2);
+    g_c1_work_us = g_c1_work_us + work;
+    g_c1_rows = g_c1_rows + 1;
+    if (work > g_c1_max_us)
+        g_c1_max_us = work;
 }
 
 void __not_in_flash_func(core1_entry)() {
@@ -307,6 +337,15 @@ void __not_in_flash_func(core1_entry)() {
     dvi_register_irqs_this_core(&g_dvi, DMA_IRQ_0);
     dvi_start(&g_dvi);
     for (;;) {
+        if (g_row == 0) {
+            const int pending = g_pending;
+            if (pending != kNoPending) {
+                g_front = pending;
+                __dmb();
+                g_pending = kNoPending;
+            }
+            g_vcount = g_vcount + 1;
+        }
         encode_row(g_row);
         g_row = (g_row + 1) % kCanvasH;
     }
@@ -318,11 +357,16 @@ extern "C" {
 
 struct dvi_inst* i_video_dvi_instance(void) { return &g_dvi; }
 
+// Display frame counter for I_GetTime() (doom/i_system.c): -1 until scan-out is running.
+int i_video_dvi_vsync_count(void) {
+    return g_vcount;
+}
+
 // g_framebuf accessors for the boot WAD-selection menu (Phase 4,
 // src/wad_menu.cpp): the LVGL display driver for this build
-// (src/lvgl_display_dvi.cpp, 320x240 canvas == g_framebuf 1:1 -- see that
+// (src/lvgl_display_dvi.cpp, 320x200 canvas == g_framebuf 1:1 -- see that
 // file) writes native-endian RGB565 straight into the same buffer core1's
-// DVI encoder re-scans at 60Hz. Boot-menu-only, core0 (this file already
+// DVI encoder re-scans at 70Hz. Boot-menu-only, core0 (this file already
 // guarantees the encoder is the only other reader).
 uint16_t* i_video_dvi_framebuf(void) { return g_framebuf; }
 
@@ -335,7 +379,7 @@ void I_InitGraphics(void) {
         return;
     g_graphics_init_done = true;
 
-    g_dvi.timing = &dvi_timing_640x480p_60hz;
+    g_dvi.timing = &dvi_timing_640x400p_70hz;
     // pico_sock_cfg (common_dvi_pin_configs.h): pins_tmds={36,34,32},
     // pins_clk=38 -- this board's actual onboard TMDS connector pins
     // (Waveshare's own official DVI demo, real-hardware confirmed).
@@ -354,7 +398,7 @@ void I_InitGraphics(void) {
     multicore_reset_core1();
     multicore_launch_core1_with_stack(core1_entry, g_core1_stack, sizeof(g_core1_stack));
 
-    printf("PicoDoom: DVI/HDMI 640x480p60, %dx%d canvas (hardware 2x horiz/vert scale, %d-row border)\n",
+    printf("PicoDoom: DVI/HDMI 640x400p70, %dx%d canvas (hardware 2x horiz/vert scale, %d-row border)\n",
            kCanvasW, kCanvasH, kBorderRows);
 }
 
@@ -382,17 +426,25 @@ void I_FinishUpdate(void) {
     // multi-screen-mode renderer needs.
     if (!g_border_painted) {
         memset(g_framebuf, 0, sizeof(g_framebuf));
+        g_front = 0;
+        g_pending = kNoPending;
         g_indexed = true;
         g_border_painted = true;
     }
 
-    // screens[0] itself is never touched here (see file header) -- just
-    // read out. Plain index copy: palette, gamma and 8-bit expansion happen on core1.
-    uint8_t* dst = reinterpret_cast<uint8_t*>(g_framebuf) + static_cast<size_t>(kBorderRows) * kCanvasW;
-    memcpy(dst, screens[0], static_cast<size_t>(kSrcRows) * kSrcCols);
+    // Wait for core1 to pick up the previously posted frame (next vblank), then fill the idle buffer.
+    while (g_pending != kNoPending)
+        tight_loop_contents();
+    const uint64_t copy_start_us = time_us_64();
+    const int back = g_front ^ 1;
+    memcpy(reinterpret_cast<uint8_t*>(g_framebuf) + static_cast<size_t>(back) * kFrameBytes +
+               static_cast<size_t>(kBorderRows) * kCanvasW,
+           screens[0], static_cast<size_t>(kSrcRows) * kCanvasW);
+    __dmb();
+    g_pending = back;
 
     uint64_t now_us = time_us_64();
-    g_convert_us_in_window += now_us - frame_start_us;
+    g_convert_us_in_window += now_us - copy_start_us;
     ++g_frames_in_window;
     report_stats_if_due(now_us);
 }
