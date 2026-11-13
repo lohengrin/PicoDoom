@@ -145,7 +145,11 @@ Pico-specific tuning lives in the serial console (type `help`):
 
 # License
 
-`doom/` is id Software's original DOOM source, distributed under the terms of
-the DOOM Source Code License (see license headers in that directory). Everything
-else (`src/`, `boards/`, build files) has no license header yet — treat as
-all-rights-reserved pending an explicit choice.
+The DOOM source in `doom/` is copyright ZeniMax Media Inc. (id Software) and is licensed under the
+**GNU General Public License, version 2** (see [LICENSE.TXT](LICENSE.TXT) and the notice at the end of
+[README.TXT](README.TXT)). Some of its file headers still carry the older DOOM Source Code License text from
+the 1997 release; the GPL 2.0 terms are the ones that apply.
+
+The Pico port in this repository (`src/`, `boards/`, build files) is linked into the same program as that
+code, so the resulting firmware is distributed under the GPL 2.0 as well. The shared
+[Pico-Toolset](third_party/pico-toolset) submodule keeps its own MIT license, which is compatible.
