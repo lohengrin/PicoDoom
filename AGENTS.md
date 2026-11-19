@@ -188,13 +188,15 @@ LCD driver.
   (`pico_toolset::SdCard::init()`, PIO-SPI GPIO30/31/40/43 incl.
   `PICO_PIO_USE_GPIO_BASE=1` for MISO>31) and carries `_gettimeofday`/`usleep`. The
   engine itself is untouched.
-- If a canonical wad (`doom1.wad`/`doom.wad`/…) sits on the SD root, `IdentifyVersion`
+- `src/sd_stdio.cpp`'s `sd_init()` `f_chdir()`s FatFs into `/PicoDoom` (creating it if missing) right after the mount, so
+  every relative path (WADs, `default.cfg`, savegames, `SdCard::list_files()`) resolves inside that folder.
+- If a canonical wad (`doom1.wad`/`doom.wad`/…) sits in `/PicoDoom`, `IdentifyVersion`
   finds it via `access()`. `src/PicoDoom.cpp` still seeds `myargc=1/myargv`.
 
 ## Boot WAD-selection menu (Phase 6, LVGL)
 
 - `src/PicoDoom.cpp` runs `wad_menu_run()` (declared `extern "C" bool`) between USB-host
-  init and `D_DoomMain()`: an LVGL v9.2.2 screen listing every IWAD on the uSD root
+  init and `D_DoomMain()`: an LVGL v9.2.2 screen listing every IWAD in the uSD `/PicoDoom` folder
   (touch / mouse / 640x480-scaled / keyboard / gamepad), 30s countdown auto-starts the
   persisted pick, Esc/Skip/gamepad-B cancels. Cancelling (or the display failing to come
   up) falls through to the engine's fixed-name scan untouched.

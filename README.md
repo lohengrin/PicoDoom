@@ -114,7 +114,8 @@ after the variant (e.g. `install/PicoDoom-lcd-st7796-release.uf2`, or
 picotool load -x -f build/PicoDoom.uf2
 ```
 - Insert a µSD card (FAT32) with one or more DOOM IWADs (`doom.wad`, `doom1.wad`,
-  `doom2.wad`, ...) at its root.
+  `doom2.wad`, ...) in its `/PicoDoom` folder (created on first boot if missing). The WAD list, `default.cfg`
+  (settings, last WAD) and savegames all live in that folder.
 - PiZero: plug in a USB keyboard (and optionally a mouse or gamepad) via the board's
   PIO-USB port.
 - Presto: nothing to plug in. Open *Bluetooth* in the boot menu (bottom right; Pico-Toolset's common
